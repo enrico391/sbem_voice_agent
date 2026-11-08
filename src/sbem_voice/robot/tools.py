@@ -1,4 +1,4 @@
-"""Six small LLM tools; ROS messages and state stay behind the tool boundary."""
+"""Robot LLM tools; ROS messages and state stay behind the tool boundary."""
 
 import asyncio
 import copy
@@ -42,6 +42,8 @@ class RobotTools:
         self.bridge = bridge
         self.motion_lock = asyncio.Lock()
         self.motion_uncertain = False
+        self.current_motion = None
+        self.navigation_cancel_requested = False
 
     @staticmethod
     def _name(name):
@@ -105,6 +107,13 @@ class RobotTools:
             pass
         return result
 
+    async def cancel_navigation(self):
+        if self.current_motion != "navigate_to":
+            return {"status": "no_active_navigation"}
+        self.navigation_cancel_requested = True
+        await self.bridge.cancel_action(self.config.actions["navigate_to"]["name"])
+        return {"status": "cancellation_requested", "operation": "navigate_to"}
+
     async def motion(self, operation, position_name=None, progress=None):
         if self.motion_uncertain:
             raise ValueError(
@@ -128,14 +137,22 @@ class RobotTools:
                 await progress(compact)
 
         async with self.motion_lock:
-            if operation == "navigate_to":
-                pose = await self._navigation_pose(position_name)
-                set_field(goal, action["pose_field"], pose)
+            self.current_motion = operation
+            self.navigation_cancel_requested = False
             try:
-                message = await self.bridge.action(action, goal, update if progress else None)
-            except (TimeoutError, ConnectionError, RuntimeError, asyncio.CancelledError):
-                self.motion_uncertain = True
-                raise
+                if operation == "navigate_to":
+                    pose = await self._navigation_pose(position_name)
+                    if self.navigation_cancel_requested:
+                        return {"status": "canceled", "operation": operation}
+                    set_field(goal, action["pose_field"], pose)
+                try:
+                    message = await self.bridge.action(action, goal, update if progress else None)
+                except (TimeoutError, ConnectionError, RuntimeError, asyncio.CancelledError):
+                    self.motion_uncertain = True
+                    raise
+            finally:
+                self.current_motion = None
+                self.navigation_cancel_requested = False
         values = message.get("values", {})
         succeeded = message.get("result") is True and message.get("status") == 4
         if isinstance(values, dict):
@@ -144,7 +161,10 @@ class RobotTools:
                 and values.get("success", True) is not False
                 and values.get("error_code", 0) == 0
             )
-        result = {"status": "succeeded" if succeeded else "failed", "operation": operation}
+        status = "succeeded" if succeeded else "failed"
+        if message.get("result") is True and message.get("status") == 5:
+            status = "canceled"
+        result = {"status": status, "operation": operation}
         if isinstance(values, dict) and isinstance(values.get("error_code"), int):
             result["error_code"] = values["error_code"]
         return result
@@ -193,6 +213,16 @@ async def navigate_to(params: FunctionCallParams, position_name: str):
 
 
 @tool_options(cancel_on_interruption=False)
+async def cancel_navigation(params: FunctionCallParams):
+    """Request cancellation of the current navigation, if any.
+
+    A cancellation request does not confirm the robot stopped. The navigation
+    tool reports the final outcome when the robot confirms it.
+    """
+    await _invoke(params, "cancel_navigation")
+
+
+@tool_options(cancel_on_interruption=False)
 async def dock(params: FunctionCallParams):
     """Dock at the configured charging station and report completion."""
     await _invoke(params, "dock")
@@ -224,7 +254,15 @@ async def get_battery_status(params: FunctionCallParams):
     await _invoke(params, "get_battery_status")
 
 
-robot_functions = [navigate_to, dock, get_positions, store_position, undock, get_battery_status]
+robot_functions = [
+    navigate_to,
+    cancel_navigation,
+    dock,
+    get_positions,
+    store_position,
+    undock,
+    get_battery_status,
+]
 
 
 @asynccontextmanager

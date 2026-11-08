@@ -157,6 +157,14 @@ class RosbridgeClient:
                 self.changed[topic].clear()
                 await self.changed[topic].wait()
 
+    async def cancel_action(self, action_name):
+        """Request cancellation of a pending goal; its action still owns the result."""
+        for call_id, (name, _) in list(self.pending.items()):
+            if name == action_name:
+                await self.send({"op": "cancel_action_goal", "id": call_id, "action": name})
+                return True
+        return False
+
     async def action(self, action, goal, progress=None):
         call_id = uuid.uuid4().hex
         queue = asyncio.Queue(maxsize=1)

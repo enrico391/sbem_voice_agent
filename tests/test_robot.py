@@ -228,6 +228,91 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "outcome unknown"):
             await self.robot.motion("undock")
 
+    async def test_cancel_navigation_requests_cancel_and_waits_for_final_outcome(self):
+        await self.robot.store_position("kitchen")
+        navigation = asyncio.create_task(self.robot.motion("navigate_to", "kitchen"))
+        goal = await self.socket.sent.get()
+        updates = []
+
+        async def callback(value):
+            updates.append(value)
+
+        params = SimpleNamespace(app_resources=self.robot, result_callback=callback)
+        cancel = next((fn for fn in robot_functions if fn.__name__ == "cancel_navigation"), None)
+        self.assertIsNotNone(cancel, "Navigation cancellation must be available to the LLM")
+        await cancel(params)
+        self.assertEqual(
+            updates, [{"status": "cancellation_requested", "operation": "navigate_to"}]
+        )
+        self.assertEqual(
+            await self.socket.sent.get(),
+            {"op": "cancel_action_goal", "id": goal["id"], "action": goal["action"]},
+        )
+        self.assertFalse(navigation.done())
+        with self.assertRaisesRegex(ValueError, "motion"):
+            await self.robot.motion("dock")
+        await self.socket.incoming.put(
+            {"op": "action_result", "id": goal["id"], "status": 5, "result": True, "values": {}}
+        )
+        self.assertEqual(await navigation, {"status": "canceled", "operation": "navigate_to"})
+        self.assertFalse(self.robot.motion_uncertain)
+        self.assertFalse(self.robot.motion_lock.locked())
+
+    async def test_cancel_navigation_does_not_cancel_docking_or_idle_robot(self):
+        self.assertEqual(await self.robot.cancel_navigation(), {"status": "no_active_navigation"})
+        docking = asyncio.create_task(self.robot.motion("dock"))
+        goal = await self.socket.sent.get()
+        self.assertEqual(await self.robot.cancel_navigation(), {"status": "no_active_navigation"})
+        self.assertTrue(self.socket.sent.empty())
+        await self.socket.incoming.put(
+            {"op": "action_result", "id": goal["id"], "status": 4, "result": True, "values": {}}
+        )
+        self.assertEqual((await docking)["status"], "succeeded")
+
+    async def test_cancel_request_does_not_override_navigation_failure(self):
+        await self.robot.store_position("kitchen")
+        navigation = asyncio.create_task(self.robot.motion("navigate_to", "kitchen"))
+        goal = await self.socket.sent.get()
+        await self.robot.cancel_navigation()
+        await self.socket.sent.get()
+        await self.socket.incoming.put(
+            {"op": "action_result", "id": goal["id"], "status": 6, "result": True, "values": {}}
+        )
+        self.assertEqual((await navigation)["status"], "failed")
+
+    async def test_cancel_during_waypoint_lookup_prevents_navigation_goal(self):
+        await self.robot.store_position("kitchen")
+        await self.socket.service_requests.get()
+        self.socket.respond = False
+        navigation = asyncio.create_task(self.robot.motion("navigate_to", "kitchen"))
+        request = await self.socket.service_requests.get()
+        self.assertEqual(
+            await self.robot.cancel_navigation(),
+            {"status": "cancellation_requested", "operation": "navigate_to"},
+        )
+        await self.socket.incoming.put(
+            {
+                "op": "service_response",
+                "id": request["id"],
+                "result": True,
+                "values": {"success": True, "location": self.socket.locations["kitchen"]},
+            }
+        )
+        self.assertEqual(await navigation, {"status": "canceled", "operation": "navigate_to"})
+        self.assertTrue(self.socket.sent.empty())
+        self.assertFalse(self.robot.motion_uncertain)
+
+    async def test_cancel_without_final_result_keeps_motion_outcome_unknown(self):
+        await self.robot.store_position("kitchen")
+        navigation = asyncio.create_task(self.robot.motion("navigate_to", "kitchen"))
+        await self.socket.sent.get()
+        await self.robot.cancel_navigation()
+        with self.assertRaises(TimeoutError):
+            await navigation
+        self.assertTrue(self.robot.motion_uncertain)
+        with self.assertRaisesRegex(ValueError, "outcome unknown"):
+            await self.robot.motion("dock")
+
     async def test_final_result_survives_late_feedback_and_disconnect(self):
         task = asyncio.create_task(self.robot.motion("dock"))
         goal = await self.socket.sent.get()
@@ -329,7 +414,7 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         from pipecat.processors.aggregators.llm_context import LLMContext
 
         context = LLMContext(tools=robot_functions)
-        self.assertEqual(len(context.tools.standard_tools), 6)
+        self.assertEqual(len(context.tools.standard_tools), 7)
         updates = []
 
         async def callback(value, *, properties=None):

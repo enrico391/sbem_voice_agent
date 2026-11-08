@@ -239,6 +239,7 @@ Keep those processes running, then start the voice assistant in another terminal
 | `get_positions()` | Lists saved names through `list_locations` |
 | `store_position(name)` | Saves the current pose through `save_location` with `overwrite: false` |
 | `navigate_to(position_name)` | Retrieves the pose through `get_location`, then sends a navigation action |
+| `cancel_navigation()` | Requests cancellation of this session's current navigation; its final outcome arrives through `navigate_to` |
 | `dock()` | Runs the configured docking action |
 | `undock()` | Runs the configured undocking action |
 | `get_battery_status()` | Returns fresh battery percentage and voltage when available |
@@ -268,7 +269,11 @@ coordinate navigation ownership with other clients to avoid preemption.
 Timeout or shutdown requests cancellation of pending actions. A cancellation
 request does not confirm that the robot stopped. Commands are not automatically
 retried. If a motion outcome is unknown, further motion is blocked until the
-robot is checked and the app restarted. This tool set has no manual stop tool.
+robot is checked and the app restarted. `cancel_navigation` targets navigation
+only; it does not cancel docking or undocking. A confirmed ROS canceled result
+is reported as `canceled`; sending the request reports `cancellation_requested`.
+Cancellation during the saved-position lookup prevents the navigation goal from
+being sent and reports `canceled` when that lookup finishes.
 A disconnected bridge invalidates telemetry; restart the app to reconnect.
 
 ## Troubleshooting
