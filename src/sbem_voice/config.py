@@ -35,6 +35,8 @@ class Settings:
     cartesia_api_key: str
     openrouter_api_key: str
     cartesia_voice_id: str
+    tts_provider: str
+    deepgram_tts_voice: str
     llm_model: str
     system_prompt_file: Path
 
@@ -50,6 +52,9 @@ class Settings:
         threshold = _positive_float("WAKEWORD_THRESHOLD", "0.5")
         if threshold > 1:
             raise ValueError("WAKEWORD_THRESHOLD must be in (0, 1]")
+        tts_provider = os.getenv("TTS_PROVIDER", "cartesia").strip().lower()
+        if tts_provider not in ("cartesia", "deepgram"):
+            raise ValueError("TTS_PROVIDER must be cartesia or deepgram")
         return cls(
             root=root.resolve(),
             wakeword_model_path=_path(root, "WAKEWORD_MODEL_PATH"),
@@ -62,6 +67,8 @@ class Settings:
             cartesia_voice_id=os.getenv(
                 "CARTESIA_VOICE_ID", "86e30c1d-714b-4074-a1f2-1cb6b552fb49"
             ),
+            tts_provider=tts_provider,
+            deepgram_tts_voice=os.getenv("DEEPGRAM_TTS_VOICE", "").strip(),
             llm_model=os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash"),
             system_prompt_file=_path(root, "SYSTEM_PROMPT_FILE")
             or (root / "config/system_prompt.md").resolve(),
@@ -87,13 +94,16 @@ class Settings:
             name
             for name, value in (
                 ("DEEPGRAM_API_KEY", self.deepgram_api_key),
-                ("CARTESIA_API_KEY", self.cartesia_api_key),
                 ("OPENROUTER_API_KEY", self.openrouter_api_key),
             )
             if not value
         ]
+        if self.tts_provider == "cartesia" and not self.cartesia_api_key:
+            missing.append("CARTESIA_API_KEY")
         if missing:
             raise ValueError(f"Set the following API keys in .env: {', '.join(missing)}")
+        if self.tts_provider == "deepgram" and not self.deepgram_tts_voice:
+            raise ValueError("Set DEEPGRAM_TTS_VOICE to your Deepgram TTS voice/model identifier")
         if self.robot_config is not None:
             from sbem_voice.robot.config import RobotConfig
 

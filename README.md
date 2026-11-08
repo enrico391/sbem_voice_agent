@@ -23,7 +23,7 @@ so ROS Humble's Python 3.10 bindings do not need to be imported into the voice a
 
 - Local wake-word detection with openWakeWord.
 - Speech recognition through Deepgram, conversation through OpenRouter, and speech
-  synthesis through Cartesia.
+  synthesis through Cartesia or Deepgram.
 - Follow-up conversations with a configurable inactivity timeout.
 - Six focused robot tools, with pushed progress and completion updates.
 - Position storage and lookup through SBEM's waypoint manager.
@@ -44,7 +44,7 @@ Microphone → Wake word → Speech recognition → LLM → Speech synthesis →
 
 - Linux with microphone and speaker access; the audio setup targets an NVIDIA Jetson.
 - Python **3.11** and **uv**.
-- API keys for **Deepgram**, **OpenRouter**, and **Cartesia**.
+- API keys for **Deepgram** and **OpenRouter**, plus **Cartesia** when selected for TTS.
 - An openWakeWord **ONNX** model and its shared feature models.
 - PulseAudio with its WebRTC echo cancellation backend for the audio launcher.
 - For robot control: ROS 2, rosbridge with native ROS 2 action support, Nav2,
@@ -96,9 +96,11 @@ variables take precedence. Relative file paths resolve from the project root.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `DEEPGRAM_API_KEY` | Speech recognition credentials | Required |
+| `DEEPGRAM_API_KEY` | Speech recognition and optional Deepgram synthesis credentials | Required |
 | `OPENROUTER_API_KEY` | LLM credentials | Required |
-| `CARTESIA_API_KEY` | Speech synthesis credentials | Required |
+| `CARTESIA_API_KEY` | Cartesia speech synthesis credentials | Required when `TTS_PROVIDER=cartesia` |
+| `TTS_PROVIDER` | Speech synthesis provider: `cartesia` or `deepgram` | `cartesia` |
+| `DEEPGRAM_TTS_VOICE` | Deepgram TTS voice/model identifier | Required when `TTS_PROVIDER=deepgram` |
 | `WAKEWORD_MODEL_PATH` | Path to an openWakeWord `.onnx` model | Required |
 | `WAKEWORD_THRESHOLD` | Detection threshold, greater than 0 and at most 1 | `0.5` |
 | `CONVERSATION_IDLE_SECS` | Listening window after an exchange | `30` |
@@ -110,6 +112,11 @@ variables take precedence. Relative file paths resolve from the project root.
 Edit [config/system_prompt.md](config/system_prompt.md) to change the assistant's
 role, language, or speaking style. Keep the spoken-output and tool-result rules.
 Restart the assistant after changing configuration or the prompt.
+
+To use Deepgram for both recognition and speech synthesis, set `TTS_PROVIDER=deepgram`
+and `DEEPGRAM_TTS_VOICE` to your chosen Deepgram voice/model identifier in `.env`.
+Both services use `DEEPGRAM_API_KEY`; `CARTESIA_API_KEY` is then optional. Restart
+the assistant to apply the change.
 
 ## Running the assistant
 
@@ -310,7 +317,7 @@ for **AEC ready**, then rerun `./sys_services_audio/run_with_audio.sh`.
 | --- | --- |
 | No duplex PyAudio `pulse` device | Install `libasound2-plugins` and check PulseAudio access |
 | Wake word is not detected | Check the ONNX path, feature models, selected microphone, and threshold |
-| Missing credentials at startup | Set all three API keys in `.env` |
+| Missing credentials at startup | Set Deepgram and OpenRouter keys, plus Cartesia's key when using Cartesia TTS |
 | Robot tools are unavailable | Set `ROBOT_CONFIG`, then restart |
 | rosbridge connection fails | Check its URL, running process, and network access |
 | Waypoint services fail | Source the custom interfaces in rosbridge's environment and check the ROS domain |
