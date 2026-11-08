@@ -1,0 +1,7 @@
+{
+  "source_master": "alsa_input.usb-Microsoft_Kinect_USB_Audio_A70776X01719234A-01.input-4-channels",
+  "sink_master": "alsa_output.usb-Logitech_Logitech_G430_Gaming_Headset-00.analog-stereo",
+  "source_name": "pipecat_aec_mic",
+  "sink_name": "pipecat_aec_speaker",
+  "poll_secs": 5
+}

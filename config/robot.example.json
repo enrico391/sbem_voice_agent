@@ -1,0 +1,66 @@
+{
+  "url": "ws://127.0.0.1:9090",
+  "frame_id": "map",
+  "connect_timeout_secs": 10,
+  "action_timeout_secs": 300,
+  "telemetry_timeout_secs": 5,
+  "telemetry_max_age_secs": 5,
+  "feedback_interval_secs": 15,
+  "feedback_max_updates": 3,
+  "battery": {
+    "topic": "/battery_state",
+    "type": "sensor_msgs/msg/BatteryState",
+    "percentage_field": "percentage",
+    "percentage_scale": 100,
+    "voltage_field": "voltage"
+  },
+  "actions": {
+    "navigate_to": {
+      "name": "/navigate_to_pose",
+      "type": "nav2_msgs/action/NavigateToPose",
+      "goal": {},
+      "pose_field": "pose",
+      "feedback_fields": [
+        "distance_remaining"
+      ]
+    },
+    "dock": {
+      "name": "/dock_robot",
+      "type": "opennav_docking_msgs/action/DockRobot",
+      "goal": {
+        "use_dock_id": true,
+        "dock_id": "charging_dock",
+        "navigate_to_staging_pose": true
+      },
+      "feedback_fields": [
+        "state"
+      ]
+    },
+    "undock": {
+      "name": "/undock_robot",
+      "type": "opennav_docking_msgs/action/UndockRobot",
+      "goal": {
+        "dock_type": ""
+      },
+      "feedback_fields": []
+    }
+  },
+  "service_timeout_secs": 10,
+  "waypoint_manager": {
+    "map_id": "",
+    "services": {
+      "save_location": {
+        "name": "/waypoint_manager/save_location",
+        "type": "sbem_waypoint_interfaces/srv/SaveLocation"
+      },
+      "list_locations": {
+        "name": "/waypoint_manager/list_locations",
+        "type": "sbem_waypoint_interfaces/srv/ListLocations"
+      },
+      "get_location": {
+        "name": "/waypoint_manager/get_location",
+        "type": "sbem_waypoint_interfaces/srv/GetLocation"
+      }
+    }
+  }
+}

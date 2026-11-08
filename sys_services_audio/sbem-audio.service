@@ -1,0 +1,15 @@
+[Unit]
+Description=SBEM microphone and speaker echo cancellation
+Wants=pulseaudio.service
+After=pulseaudio.service
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 "%h/.local/lib/sbem-audio/audio_service.py" --config "%h/.config/sbem-audio/audio.json"
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
