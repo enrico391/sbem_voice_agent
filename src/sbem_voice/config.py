@@ -39,6 +39,9 @@ class Settings:
     deepgram_tts_voice: str
     llm_model: str
     system_prompt_file: Path
+    memory_db_path: Path
+    memory_user_id: str
+    session_timeout_secs: float
 
     @classmethod
     def from_env(cls, root: Path) -> "Settings":
@@ -55,6 +58,9 @@ class Settings:
         tts_provider = os.getenv("TTS_PROVIDER", "cartesia").strip().lower()
         if tts_provider not in ("cartesia", "deepgram"):
             raise ValueError("TTS_PROVIDER must be cartesia or deepgram")
+        memory_user_id = os.getenv("MEMORY_USER_ID", "default").strip()
+        if not memory_user_id or len(memory_user_id) > 128:
+            raise ValueError("MEMORY_USER_ID must contain 1 to 128 characters")
         return cls(
             root=root.resolve(),
             wakeword_model_path=_path(root, "WAKEWORD_MODEL_PATH"),
@@ -72,6 +78,10 @@ class Settings:
             llm_model=os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash"),
             system_prompt_file=_path(root, "SYSTEM_PROMPT_FILE")
             or (root / "config/system_prompt.md").resolve(),
+            memory_db_path=_path(root, "MEMORY_DB_PATH")
+            or (root / "data/memory.sqlite3").resolve(),
+            memory_user_id=memory_user_id,
+            session_timeout_secs=_positive_float("SESSION_TIMEOUT_SECS", "300"),
         )
 
     def load_system_prompt(self) -> str:

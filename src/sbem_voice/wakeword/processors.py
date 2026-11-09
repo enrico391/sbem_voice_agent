@@ -12,6 +12,7 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     InterimTranscriptionFrame,
     LLMFullResponseEndFrame,
+    LLMMessagesUpdateFrame,
     SystemFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
@@ -89,7 +90,19 @@ class WakeWordGate(FrameProcessor):
             await self.push_frame(frame, direction)
             return
         if self._session.awake:
-            await self.push_frame(frame, direction)
+            if self._session.closing:
+                # Let downstream VAD end any turn already in progress without
+                # sending the user's microphone speech to recognition.
+                await self.push_frame(
+                    InputAudioRawFrame(
+                        audio=bytes(len(frame.audio)),
+                        sample_rate=frame.sample_rate,
+                        num_channels=frame.num_channels,
+                    ),
+                    direction,
+                )
+            else:
+                await self.push_frame(frame, direction)
             return
         if frame.num_channels != 1 or frame.sample_rate not in (8000, 16000):
             raise ValueError("Wake detection requires mono 8 kHz or 16 kHz int16 PCM")
@@ -178,7 +191,9 @@ class AwakeTranscriptFilter(FrameProcessor):
             frame, (TranscriptionFrame, InterimTranscriptionFrame)
         ):
             frame.metadata["sbem_activation"] = (
-                self._session.generation if self._session.awake else None
+                self._session.generation
+                if self._session.awake and not self._session.closing
+                else None
             )
         await super().queue_frame(frame, direction, callback)
 
@@ -188,8 +203,18 @@ class AwakeTranscriptFilter(FrameProcessor):
             frame, (TranscriptionFrame, InterimTranscriptionFrame)
         ):
             admitted = frame.metadata.get("sbem_activation", self._session.generation)
-            if not self._session.awake or admitted != self._session.generation:
+            if (
+                not self._session.awake
+                or self._session.closing
+                or admitted != self._session.generation
+            ):
                 return
+            if (
+                isinstance(frame, TranscriptionFrame)
+                and frame.text.strip()
+                and await self._session.consume_context_reset()
+            ):
+                await self.push_frame(LLMMessagesUpdateFrame(messages=[], run_llm=False), direction)
         await self.push_frame(frame, direction)
 
 

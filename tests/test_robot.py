@@ -237,7 +237,9 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         async def callback(value):
             updates.append(value)
 
-        params = SimpleNamespace(app_resources=self.robot, result_callback=callback)
+        params = SimpleNamespace(
+            app_resources=SimpleNamespace(robot=self.robot), result_callback=callback
+        )
         cancel = next((fn for fn in robot_functions if fn.__name__ == "cancel_navigation"), None)
         self.assertIsNotNone(cancel, "Navigation cancellation must be available to the LLM")
         await cancel(params)
@@ -415,7 +417,9 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         async def callback(value):
             results.append(value)
 
-        params = SimpleNamespace(app_resources=self.robot, result_callback=callback)
+        params = SimpleNamespace(
+            app_resources=SimpleNamespace(robot=self.robot), result_callback=callback
+        )
         store = next(fn for fn in robot_functions if fn.__name__ == "store_position")
         task = asyncio.create_task(store(params, "hall"))
         request = await self.socket.service_requests.get()
@@ -441,7 +445,9 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         async def callback(value, *, properties=None):
             updates.append((value, properties))
 
-        params = SimpleNamespace(app_resources=self.robot, result_callback=callback)
+        params = SimpleNamespace(
+            app_resources=SimpleNamespace(robot=self.robot), result_callback=callback
+        )
         dock = next(fn for fn in robot_functions if fn.__name__ == "dock")
         task = asyncio.create_task(dock(params))
         goal = await self.socket.sent.get()

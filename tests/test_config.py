@@ -7,6 +7,35 @@ from sbem_voice.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_session_timeout_default_and_override(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(Settings.from_env(Path("/tmp")).session_timeout_secs, 300)
+        with patch.dict("os.environ", {"SESSION_TIMEOUT_SECS": "600"}, clear=True):
+            self.assertEqual(Settings.from_env(Path("/tmp")).session_timeout_secs, 600)
+
+    def test_memory_defaults_and_custom_user_and_path(self):
+        with patch.dict("os.environ", {}, clear=True):
+            settings = Settings.from_env(Path("/tmp/project"))
+        self.assertEqual(settings.memory_db_path, Path("/tmp/project/data/memory.sqlite3"))
+        self.assertEqual(settings.memory_user_id, "default")
+        with patch.dict(
+            "os.environ",
+            {"MEMORY_DB_PATH": "custom/facts.sqlite3", "MEMORY_USER_ID": " alice "},
+            clear=True,
+        ):
+            settings = Settings.from_env(Path("/tmp/project"))
+        self.assertEqual(settings.memory_db_path, Path("/tmp/project/custom/facts.sqlite3"))
+        self.assertEqual(settings.memory_user_id, "alice")
+
+    def test_invalid_memory_user_fails_early(self):
+        for user_id in ["", "   ", "x" * 129]:
+            with (
+                self.subTest(user_id=user_id),
+                patch.dict("os.environ", {"MEMORY_USER_ID": user_id}, clear=True),
+                self.assertRaisesRegex(ValueError, "MEMORY_USER_ID"),
+            ):
+                Settings.from_env(Path("/tmp"))
+
     def test_rejects_unknown_tts_provider(self):
         with patch.dict("os.environ", {"TTS_PROVIDER": "unknown"}, clear=True):
             with self.assertRaisesRegex(ValueError, "TTS_PROVIDER"):
@@ -36,6 +65,7 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_timeout_and_threshold(self):
         for key, values in {
             "CONVERSATION_IDLE_SECS": ["0", "-1", "nan", "inf", "oops"],
+            "SESSION_TIMEOUT_SECS": ["0", "-1", "nan", "inf", "oops"],
             "WAKEWORD_THRESHOLD": ["0", "1.1", "nan"],
         }.items():
             for value in values:

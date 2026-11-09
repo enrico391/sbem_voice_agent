@@ -182,9 +182,9 @@ async def _invoke(params, operation, *args):
                     result, properties=FunctionCallResultProperties(is_final=False)
                 )
 
-            result = await params.app_resources.motion(operation, *args, progress=progress)
+            result = await params.app_resources.robot.motion(operation, *args, progress=progress)
         else:
-            result = await getattr(params.app_resources, operation)(*args)
+            result = await getattr(params.app_resources.robot, operation)(*args)
     except TimeoutError:
         result = {
             "status": "error",

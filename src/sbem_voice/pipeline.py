@@ -18,6 +18,9 @@ from pipecat.workers.runner import WorkerRunner
 
 from sbem_voice.audio.speaker_mute import SpeakerMuteStrategy
 from sbem_voice.config import Settings
+from sbem_voice.memory.store import MemoryStore
+from sbem_voice.memory.tools import memory_functions
+from sbem_voice.resources import AppResources
 from sbem_voice.robot.tools import connect_robot, robot_functions
 from sbem_voice.services.llm import create_llm
 from sbem_voice.services.stt import create_stt
@@ -31,6 +34,7 @@ from sbem_voice.wakeword.processors import (
     WakeWordGate,
 )
 from sbem_voice.wakeword.session import ConversationSession
+from sbem_voice.wakeword.tools import end_conversation
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, settings: Settings):
@@ -38,13 +42,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, settin
     detector = await asyncio.to_thread(
         OpenWakeWordDetector, settings.wakeword_model_path, settings.wakeword_threshold
     )
-    session = ConversationSession(settings.conversation_idle_secs)
+    session = ConversationSession(settings.conversation_idle_secs, settings.session_timeout_secs)
     args = runner_args.cli_args
     async with connect_robot(settings.robot_config) as robot:
         stt = create_stt(settings)
         llm = create_llm(settings)
         tts = create_tts(settings)
-        context = LLMContext(tools=robot_functions if robot else [])
+        memory = await asyncio.to_thread(
+            MemoryStore, settings.memory_db_path, settings.memory_user_id
+        )
+        context = LLMContext(
+            tools=[end_conversation, *memory_functions, *(robot_functions if robot else [])]
+        )
         user, assistant = LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
@@ -81,7 +90,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, settin
         )
         worker = PipelineWorker(
             pipeline,
-            app_resources=robot,
+            app_resources=AppResources(memory=memory, robot=robot, session=session),
             params=PipelineParams(
                 audio_in_sample_rate=getattr(args, "input_sample_rate", 16000),
                 enable_metrics=True,

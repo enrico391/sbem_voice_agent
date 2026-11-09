@@ -12,6 +12,7 @@ from pipecat.frames.frames import (
     FunctionCallsStartedFrame,
     InputAudioRawFrame,
     LLMFullResponseStartFrame,
+    LLMMessagesUpdateFrame,
     TranscriptionFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
@@ -38,6 +39,122 @@ class Detector:
 
 
 class WakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_applies_to_next_transcript_even_without_another_wake(self):
+        now = [100.0]
+        self.session._clock = lambda: now[0]
+        await self.session.wake()
+        now[0] = 401.0
+        await self.guard.process_frame(
+            TranscriptionFrame(text="new request", user_id="", timestamp=""),
+            FrameDirection.DOWNSTREAM,
+        )
+        self.assertIsInstance(self.sent[0], LLMMessagesUpdateFrame)
+
+    async def test_close_during_user_speech_does_not_leave_next_wake_busy(self):
+        await self.session.wake()
+        await self.session.user_started()
+        await self.session.request_end()
+        await self.session.process_frame(LLMFullResponseStartFrame())
+        await self.session.response_finished()
+        self.assertFalse(self.session.awake)
+        await self.session.wake()
+        await asyncio.sleep(0.08)
+        self.assertFalse(self.session.awake)
+
+    async def test_session_context_retained_before_timeout_and_reset_after_idle_gap(self):
+        now = [100.0]
+        self.session._clock = lambda: now[0]
+        await self.session.wake()
+        await self.session.sleep()
+        now[0] = 399.0
+        await self.session.wake()
+        frame = TranscriptionFrame(text="follow up", user_id="", timestamp="")
+        await self.guard.process_frame(frame, FrameDirection.DOWNSTREAM)
+        self.assertEqual(self.sent, [frame])
+        await self.session.sleep()
+        self.sent.clear()
+        now[0] = 700.0
+        await self.session.wake()
+        await self.guard.process_frame(frame, FrameDirection.DOWNSTREAM)
+        self.assertIsInstance(self.sent[0], LLMMessagesUpdateFrame)
+        self.assertEqual(self.sent[0].messages, [])
+        self.assertFalse(self.sent[0].run_llm)
+        self.assertIs(self.sent[1], frame)
+        self.sent.clear()
+        await self.guard.process_frame(frame, FrameDirection.DOWNSTREAM)
+        self.assertEqual(self.sent, [frame])
+
+    async def test_long_response_does_not_expire_context(self):
+        now = [100.0]
+        self.session._clock = lambda: now[0]
+        await self.session.wake()
+        await self.session.user_started()
+        await self.session.user_stopped(has_text=True)
+        now[0] = 1000.0
+        await self.session.process_frame(LLMFullResponseStartFrame())
+        await self.session.response_finished()
+        await self.session.sleep()
+        now[0] = 1100.0
+        await self.session.wake()
+        frame = TranscriptionFrame(text="follow up", user_id="", timestamp="")
+        await self.guard.process_frame(frame, FrameDirection.DOWNSTREAM)
+        self.assertEqual(self.sent, [frame])
+
+    async def test_end_conversation_blocks_input_finishes_reply_and_resets_next_wake(self):
+        await self.session.wake()
+        await self.session.request_end()
+        self.assertTrue(self.session.awake)
+        await self.audio()
+        await self.guard.process_frame(
+            TranscriptionFrame(text="late input", user_id="", timestamp=""),
+            FrameDirection.DOWNSTREAM,
+        )
+        # Silence lets native VAD finish an already-started turn, without sending
+        # microphone speech to STT or admitting another transcript.
+        self.assertEqual(len(self.sent), 1)
+        self.assertIsInstance(self.sent[0], InputAudioRawFrame)
+        self.assertFalse(any(self.sent[0].audio))
+        self.assertEqual(len(self.sent[0].audio), 640)
+        await self.session.process_frame(LLMFullResponseStartFrame())
+        await self.session.process_frame(BotStartedSpeakingFrame())
+        await self.session.response_finished()
+        self.assertTrue(self.session.awake)
+        await self.session.process_frame(BotStoppedSpeakingFrame())
+        self.assertFalse(self.session.awake)
+        self.detector.detect_at = 1
+        await self.audio(b"\x02\x00" * 1280)
+        self.assertTrue(self.session.awake)
+        self.sent.clear()
+        await self.guard.process_frame(
+            TranscriptionFrame(text="new conversation", user_id="", timestamp=""),
+            FrameDirection.DOWNSTREAM,
+        )
+        self.assertIsInstance(self.sent[0], LLMMessagesUpdateFrame)
+
+    async def test_end_waits_for_tool_result_and_its_final_response(self):
+        await self.session.wake()
+        await self.session.process_frame(
+            FunctionCallsStartedFrame(function_calls=[SimpleNamespace(tool_call_id="moving")])
+        )
+        await self.session.request_end()
+        await self.session.process_frame(LLMFullResponseStartFrame())
+        await self.session.response_finished()
+        self.assertTrue(self.session.awake)
+        await self.session.process_frame(
+            FunctionCallResultFrame(
+                function_name="navigate_to",
+                tool_call_id="moving",
+                arguments={},
+                result={"status": "succeeded"},
+            )
+        )
+        # An earlier response's trailing end marker must not close the session.
+        await self.session.response_finished()
+        self.assertTrue(self.session.awake)
+        await self.session.process_frame(LLMFullResponseStartFrame())
+        await self.session.response_finished()
+        self.assertFalse(self.session.awake)
+
     async def test_intermediate_tool_update_keeps_session_awake_until_final_result(self):
         await self.session.wake()
         await self.session.process_frame(

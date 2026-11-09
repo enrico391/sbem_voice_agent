@@ -25,6 +25,7 @@ so ROS Humble's Python 3.10 bindings do not need to be imported into the voice a
 - Speech recognition through Deepgram, conversation through OpenRouter, and speech
   synthesis through Cartesia or Deepgram.
 - Follow-up conversations with a configurable inactivity timeout.
+- Persistent SQLite memory with tools to remember, retrieve, correct, and forget facts.
 - Six focused robot tools, with pushed progress and completion updates.
 - Position storage and lookup through SBEM's waypoint manager.
 - PulseAudio echo cancellation for the Kinect microphone and Logitech speaker.
@@ -104,10 +105,13 @@ variables take precedence. Relative file paths resolve from the project root.
 | `WAKEWORD_MODEL_PATH` | Path to an openWakeWord `.onnx` model | Required |
 | `WAKEWORD_THRESHOLD` | Detection threshold, greater than 0 and at most 1 | `0.5` |
 | `CONVERSATION_IDLE_SECS` | Listening window after an exchange | `30` |
+| `SESSION_TIMEOUT_SECS` | Inactivity gap before a fresh conversation context | `300` |
 | `OPENROUTER_MODEL` | OpenRouter model identifier | `deepseek/deepseek-v4.1-flash` |
 | `CARTESIA_VOICE_ID` | Cartesia voice identifier | See `src/sbem_voice/config.py` |
 | `SYSTEM_PROMPT_FILE` | UTF-8 system prompt | `config/system_prompt.md` |
 | `ROBOT_CONFIG` | Robot interface configuration | Unset; conversation only |
+| `MEMORY_DB_PATH` | Persistent SQLite memory file, relative to the project root | `data/memory.sqlite3` |
+| `MEMORY_USER_ID` | Application-selected memory profile | `default` |
 
 Edit [config/system_prompt.md](config/system_prompt.md) to change the assistant's
 role, language, or speaking style. Keep the spoken-output and tool-result rules.
@@ -171,12 +175,62 @@ cancellation or headphones.
 The assistant starts silently. Say the wake word followed by a command. Follow-up
 questions do not need the wake word until the inactivity timeout expires.
 
-The timeout pauses during speech, response generation, and pending tools. Sleep
-keeps the process running and preserves conversation history. While asleep,
+The listening timeout pauses during speech, response generation, and pending tools.
+Sleep keeps the process running. Follow-ups retain conversation history until
+`SESSION_TIMEOUT_SECS` passes without conversation activity (five minutes by
+default). After that gap, history is cleared before the next admitted request;
+the system instructions, available tools, and saved SQLite memories remain.
+Speech, response generation, and pending tools are never cut off by this timeout.
+This inactivity policy does not limit the size of a continuously active conversation.
+While asleep,
 microphone audio is blocked before speech recognition, although the provider
 connection may remain open for keepalives.
 
+The `end_conversation()` tool lets SBEM handle a clear goodbye or a request to stop
+listening. It blocks new conversational input, lets the final reply and pending
+tool results finish, then returns to wake-word listening. The next wake starts a
+fresh conversation. It does not shut down the app or cancel robot motion.
+
 Press **Ctrl+C** to stop.
+
+### Persistent memory
+
+Memory tools are available with or without robot integration. The database and
+its parent directory are created automatically on startup, using Python's built-in
+SQLite library. No additional API key or dependency is needed. Saved facts survive
+sleep and application restarts; the conversation transcript remains in process memory.
+
+Try saying:
+
+- "Remember that I prefer speaking Italian."
+- "What do you remember about my language preference?"
+- "Update my language preference to English."
+- "Forget my language preference."
+
+The tools are `remember_memory(content)`,
+`retrieve_memory(query="", limit=20, offset=0)`,
+`update_memory(memory_id, content)`, and `remove_memory(memory_id)`.
+Retrieval uses literal, case-insensitive substring matching, including Unicode;
+it is not semantic search. An empty query lists saved memories. Results include
+record IDs, timestamps, `has_more`, and `next_offset` for pagination, with at most
+50 records per page. Updates and removals target an exact retrieved ID. Each fact
+is limited to 2000 characters, and identical facts in a profile are not duplicated.
+
+This version remembers facts only through tool calls, guided by explicit user
+requests. It does not automatically extract facts or preload a profile on every
+turn. If you use a custom `SYSTEM_PROMPT_FILE`, include the persistent-memory
+instructions from the default prompt so the assistant knows when to use the tools.
+
+All speakers share `MEMORY_USER_ID=default` until identification is implemented.
+Changing that setting selects a separate profile in the same database; it does
+not identify a speaker or migrate old facts. The model cannot choose a user ID.
+Future identification code can select the profile when creating session resources.
+
+The database is local, unencrypted, and excluded from Git at the default path.
+Exclude custom storage paths from version control too. Retrieved facts are sent
+to the configured LLM as tool results. Forgetting deletes a stored record; it
+does not erase previous turns from the running conversation or existing backups.
+Stop the assistant before copying the database file for a simple backup.
 
 ## Robot integration
 
@@ -363,12 +417,14 @@ and robot actions separately on the target hardware.
 ├── models/                    Local wake-word models and setup guide
 ├── src/sbem_voice/
 │   ├── audio/                 Audio transport and speaker muting
+│   ├── memory/                SQLite persistence and native memory tools
 │   ├── robot/                 rosbridge client, configuration, and tools
 │   ├── services/              STT, LLM, and TTS factories
 │   ├── wakeword/              Wake detection and conversation lifecycle
 │   ├── cli.py                 Command-line interface
 │   ├── config.py              Application settings
-│   └── pipeline.py            Pipecat pipeline assembly
+│   ├── pipeline.py            Pipecat pipeline assembly
+│   └── resources.py           Shared memory and robot resources
 ├── sys_services_audio/        PulseAudio service and startup launcher
 ├── tests/                     Offline regression and integration tests
 ├── .env.example               Environment variable template
