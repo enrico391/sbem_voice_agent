@@ -105,6 +105,9 @@ class RobotTools:
                 result["voltage"] = round(voltage, 2)
         except (KeyError, TypeError):
             pass
+        power_supply_status = message.get("power_supply_status")
+        if _number(power_supply_status) and power_supply_status in (1, 2):
+            result["charging"] = power_supply_status == 1
         return result
 
     async def cancel_navigation(self):
@@ -250,7 +253,7 @@ async def store_position(params: FunctionCallParams, name: str):
 
 
 async def get_battery_status(params: FunctionCallParams):
-    """Read fresh battery percentage and voltage, when available."""
+    """Read fresh battery percentage, voltage, and charging status, when available."""
     await _invoke(params, "get_battery_status")
 
 

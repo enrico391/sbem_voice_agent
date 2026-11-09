@@ -249,7 +249,10 @@ Keep those processes running, then start the voice assistant in another terminal
 | `cancel_navigation()` | Requests cancellation of this session's current navigation; its final outcome arrives through `navigate_to` |
 | `dock()` | Runs the configured docking action |
 | `undock()` | Runs the configured undocking action |
-| `get_battery_status()` | Returns fresh battery percentage and voltage when available |
+| `get_battery_status()` | Returns fresh battery percentage, voltage, and charging status when available |
+
+Battery results include `charging: true` when `power_supply_status` is `1`, and
+`charging: false` when it is `2`. Missing or other status values omit `charging`.
 
 The waypoint manager owns position persistence, TF capture, and map metadata.
 Navigation preserves its fresh pose timestamp and rejects locations that do not

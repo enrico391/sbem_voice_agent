@@ -325,6 +325,27 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.close()
         self.assertEqual((await task)["status"], "succeeded")
 
+    async def test_battery_reports_charging_status(self):
+        for status, charging in ((1, True), (2, False)):
+            with self.subTest(power_supply_status=status):
+                await self.publish(
+                    self.config.battery["topic"],
+                    {"percentage": 0.62, "voltage": 25, "power_supply_status": status},
+                )
+                self.assertEqual(
+                    await self.robot.get_battery_status(),
+                    {"percent": 62, "voltage": 25, "charging": charging},
+                )
+
+    async def test_battery_does_not_guess_unknown_charging_status(self):
+        for status in (None, 0, 3, 4, True, "1"):
+            with self.subTest(power_supply_status=status):
+                await self.publish(
+                    self.config.battery["topic"],
+                    {"percentage": 0.62, "power_supply_status": status},
+                )
+                self.assertEqual(await self.robot.get_battery_status(), {"percent": 62})
+
     async def test_missing_and_stale_telemetry_are_not_reported_as_current(self):
         with self.assertRaises(TimeoutError):
             await self.robot.get_battery_status()
