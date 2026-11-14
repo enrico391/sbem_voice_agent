@@ -144,7 +144,7 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         from pipecat.services.openrouter.llm import OpenRouterLLMService
 
         context = LLMContext(tools=memory_functions + robot_functions)
-        self.assertEqual(len(context.tools.standard_tools), 12)
+        self.assertEqual(len(context.tools.standard_tools), 13)
         llm = OpenRouterLLMService(api_key="offline-test")
         try:
             llm._sync_registered_tool_handlers(context.tools)

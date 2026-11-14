@@ -889,6 +889,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "openwakeword" },
+    { name = "pillow" },
     { name = "pipecat-ai", extra = ["deepgram", "local", "openai"] },
     { name = "python-dotenv" },
     { name = "websockets" },
@@ -903,6 +904,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "openwakeword", specifier = "==0.6.0" },
+    { name = "pillow", specifier = ">=11,<13" },
     { name = "pipecat-ai", extras = ["cartesia", "deepgram", "local", "openai", "silero"], specifier = "==1.13.0" },
     { name = "python-dotenv", specifier = ">=1.0,<2" },
     { name = "websockets", specifier = ">=15,<18" },

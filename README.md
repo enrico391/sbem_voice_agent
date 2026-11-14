@@ -26,7 +26,7 @@ so ROS Humble's Python 3.10 bindings do not need to be imported into the voice a
   synthesis through Cartesia or Deepgram.
 - Follow-up conversations with a configurable inactivity timeout.
 - Persistent SQLite memory with tools to remember, retrieve, correct, and forget facts.
-- Eight focused robot tools, with pushed progress and completion updates.
+- Nine focused robot tools, with pushed progress and completion updates.
 - Position storage and lookup through SBEM's waypoint manager.
 - PulseAudio echo cancellation for the Kinect microphone and Logitech speaker.
 - Offline regression tests and a local WebSocket integration fixture.
@@ -262,6 +262,8 @@ and battery endpoints must be checked against your deployment.
 | `waypoint_manager.services.*` | Save, list, and get service names and types |
 | `waypoint_manager.map_id` | Empty for the current map; explicit ID for saved-map list/get requests |
 | `battery` | Topic, message type, dotted field paths, and percentage scale |
+| `camera.topic` | Camera topic using `sensor_msgs/msg/Image`; default `/camera/image_raw` |
+| `camera.timeout_secs`, `camera.max_dimension` | Snapshot timeout and maximum output edge; defaults `5` seconds and `1024` pixels |
 | `cmd_vel.topic` | Direct velocity topic using `geometry_msgs/msg/Twist`; default `/cmd_vel` |
 | `cmd_vel.max_linear_x`, `cmd_vel.max_angular_z` | Absolute speed limits; defaults `0.2` m/s and `0.5` rad/s |
 | `cmd_vel.max_duration_secs`, `cmd_vel.publish_rate_hz` | Command duration limit and publishing rate; defaults `5` seconds and `10` Hz (maximum `100` Hz) |
@@ -308,9 +310,36 @@ Keep those processes running, then start the voice assistant in another terminal
 | `dock()` | Runs the configured docking action |
 | `undock()` | Runs the configured undocking action |
 | `get_battery_status()` | Returns fresh battery percentage, voltage, and charging status when available |
+| `get_camera_image()` | Captures one camera frame and attaches a JPEG image to the LLM context for visual analysis |
 
 Battery results include `charging: true` when `power_supply_status` is `1`, and
 `charging: false` when it is `2`. Missing or other status values omit `charging`.
+
+The camera tool subscribes on demand, waits for one newly received frame, then
+unsubscribes. It accepts `rgb8`, `bgr8`, `rgba8`, `bgra8`, and `mono8`, including
+padded image rows. It resizes the image while preserving its aspect ratio and
+attaches the actual JPEG as an image message before the model's next response.
+The tool result contains only capture status and dimensions. Raw images are
+limited to 10 MiB and incoming WebSocket messages to 16 MiB. Depth and compressed
+image topics are not supported by this tool.
+
+Use an OpenRouter model that supports both image inputs and tools. The project
+default supports both; custom `OPENROUTER_MODEL` selections must also do so.
+For a RealSense color camera, configure the topic in `config/robot.json`:
+
+```json
+"camera": {
+  "topic": "/camera0/camera/color/image_raw",
+  "timeout_secs": 5,
+  "max_dimension": 1024
+}
+```
+
+Ask, for example, “What can you see?” or “Read the label in front of you.” The
+model receives a snapshot, not continuous video, and reports unavailable images
+or uncertain details rather than inventing a view. Images remain in the current
+conversation context and follow its normal reset behavior; they are not written
+to disk or saved as persistent memories by the camera tool.
 
 The waypoint manager owns position persistence, TF capture, and map metadata.
 Navigation preserves its fresh pose timestamp and rejects locations that do not

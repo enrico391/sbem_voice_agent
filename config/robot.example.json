@@ -7,6 +7,11 @@
   "telemetry_max_age_secs": 5,
   "feedback_interval_secs": 15,
   "feedback_max_updates": 3,
+  "camera": {
+    "topic": "/camera/image_raw",
+    "timeout_secs": 5,
+    "max_dimension": 1024
+  },
   "cmd_vel": {
     "topic": "/cmd_vel",
     "max_linear_x": 0.2,

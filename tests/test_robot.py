@@ -114,6 +114,65 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.incoming.put({"op": "publish", "topic": topic, "msg": msg})
         await asyncio.sleep(0)
 
+    async def test_camera_snapshot_subscribes_once_and_unsubscribes(self):
+        self.assertTrue(hasattr(self.bridge, "camera_snapshot"), "Camera capture is missing")
+        capture = asyncio.create_task(self.bridge.camera_snapshot())
+        request = await asyncio.wait_for(self.socket.sent.get(), 1)
+        self.assertEqual(request["op"], "subscribe")
+        self.assertEqual(request["topic"], "/camera/image_raw")
+        self.assertEqual(request["type"], "sensor_msgs/msg/Image")
+        self.assertEqual(request["queue_length"], 1)
+        message = {"width": 2, "height": 1, "encoding": "rgb8", "data": "fresh"}
+        await self.publish(request["topic"], message)
+        self.assertEqual(await capture, message)
+        self.assertEqual(
+            await self.socket.sent.get(),
+            {
+                "op": "unsubscribe",
+                "id": request["id"],
+                "topic": request["topic"],
+            },
+        )
+        self.assertNotIn(request["topic"], self.bridge.cache)
+
+    async def test_camera_timeout_and_cancellation_unsubscribe(self):
+        self.assertTrue(hasattr(self.bridge, "camera_snapshot"), "Camera capture is missing")
+        self.bridge.config = replace(
+            self.config, camera={**self.config.camera, "timeout_secs": 0.02}
+        )
+        capture = asyncio.create_task(self.bridge.camera_snapshot())
+        await self.socket.sent.get()
+        with self.assertRaises(TimeoutError):
+            await capture
+        self.assertEqual((await self.socket.sent.get())["op"], "unsubscribe")
+        capture = asyncio.create_task(self.bridge.camera_snapshot())
+        await self.socket.sent.get()
+        capture.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await capture
+        self.assertEqual((await self.socket.sent.get())["op"], "unsubscribe")
+
+    async def test_camera_subscription_error_is_reported_and_disconnect_wakes_capture(self):
+        self.assertTrue(hasattr(self.bridge, "camera_snapshot"), "Camera capture is missing")
+        capture = asyncio.create_task(self.bridge.camera_snapshot())
+        request = await self.socket.sent.get()
+        await self.socket.incoming.put(
+            {
+                "op": "status",
+                "level": "error",
+                "id": request["id"],
+                "msg": "private error",
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "Camera subscription rejected"):
+            await capture
+        await self.socket.sent.get()  # unsubscribe
+        capture = asyncio.create_task(self.bridge.camera_snapshot())
+        await self.socket.sent.get()
+        await self.socket.close()
+        with self.assertRaises(ConnectionError):
+            await capture
+
     async def test_cmd_vel_streams_twist_then_sends_zero(self):
         command = next((fn for fn in robot_functions if fn.__name__ == "cmd_vel"), None)
         self.assertIsNotNone(command, "cmd_vel must be available to the LLM")
@@ -654,7 +713,7 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         from pipecat.processors.aggregators.llm_context import LLMContext
 
         context = LLMContext(tools=robot_functions)
-        self.assertEqual(len(context.tools.standard_tools), 8)
+        self.assertEqual(len(context.tools.standard_tools), 9)
         updates = []
 
         async def callback(value, *, properties=None):
@@ -686,6 +745,39 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_camera_defaults_keep_older_configs_compatible(self):
+        data = json.loads(Path("config/robot.example.json").read_text())
+        data.pop("camera", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "robot.json"
+            path.write_text(json.dumps(data))
+            config = RobotConfig.load(path)
+        self.assertEqual(
+            config.camera,
+            {
+                "topic": "/camera/image_raw",
+                "timeout_secs": 5,
+                "max_dimension": 1024,
+            },
+        )
+
+    def test_rejects_invalid_camera_configuration(self):
+        original = json.loads(Path("config/robot.example.json").read_text())
+        valid = original["camera"]
+        invalid = [None, {}, {**valid, "unknown": 1}]
+        for key, values in {
+            "topic": ["", "relative/topic", 12],
+            "timeout_secs": [0, -1, True, "5", float("nan"), float("inf")],
+            "max_dimension": [0, -1, True, 2.5, 2049],
+        }.items():
+            invalid.extend({**valid, key: value} for value in values)
+        for block in invalid:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "robot.json"
+                path.write_text(json.dumps({**original, "camera": block}))
+                with self.subTest(block=block), self.assertRaises(ValueError):
+                    RobotConfig.load(path)
+
     def test_cmd_vel_defaults_keep_older_configs_compatible(self):
         data = json.loads(Path("config/robot.example.json").read_text())
         data.pop("cmd_vel", None)

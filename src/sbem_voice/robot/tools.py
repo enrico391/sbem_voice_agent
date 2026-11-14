@@ -6,10 +6,12 @@ import math
 from contextlib import asynccontextmanager
 
 from pipecat.adapters.schemas.direct_function import tool_options
-from pipecat.frames.frames import FunctionCallResultProperties
+from pipecat.frames.frames import FunctionCallResultProperties, LLMMessagesAppendFrame
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.services.llm_service import FunctionCallParams
 
 from sbem_voice.robot.bridge import RosbridgeClient
+from sbem_voice.robot.camera import encode_camera_image
 from sbem_voice.robot.config import RobotConfig, field, set_field
 
 
@@ -71,6 +73,12 @@ class RobotTools:
         ):
             raise ValueError("Invalid waypoint list response")
         return {"positions": sorted(item["name"] for item in locations)}
+
+    async def get_camera_image(self):
+        message = await self.bridge.camera_snapshot()
+        return await asyncio.to_thread(
+            encode_camera_image, message, self.config.camera["max_dimension"]
+        )
 
     async def store_position(self, name):
         name = self._name(name)
@@ -253,6 +261,18 @@ async def _invoke(params, operation, *args):
                 )
 
             result = await params.app_resources.robot.motion(operation, *args, progress=progress)
+        elif operation == "get_camera_image":
+            jpeg, size = await params.app_resources.robot.get_camera_image()
+            message = await LLMContext.create_image_message(
+                format="image/jpeg",
+                size=size,
+                image=jpeg,
+                text="Current snapshot from the robot's camera.",
+            )
+            # Append the image before the result triggers the next completion.
+            # Binary image content belongs in a user image message, not tool JSON.
+            await params.llm.push_frame(LLMMessagesAppendFrame(messages=[message], run_llm=False))
+            result = {"status": "captured", "width": size[0], "height": size[1]}
         else:
             result = await getattr(params.app_resources.robot, operation)(*args)
     except TimeoutError:
@@ -262,6 +282,8 @@ async def _invoke(params, operation, *args):
                 "Timed out. Motion outcome may be unknown; a cancellation request "
                 "does not confirm the robot stopped."
                 if operation in ("navigate_to", "dock", "undock", "cmd_vel")
+                else "Camera image timed out; no image was captured."
+                if operation == "get_camera_image"
                 else "Waypoint or telemetry request timed out; do not assume it succeeded."
             ),
         }
@@ -345,7 +367,18 @@ async def get_battery_status(params: FunctionCallParams):
     await _invoke(params, "get_battery_status")
 
 
+async def get_camera_image(params: FunctionCallParams):
+    """Capture a fresh camera snapshot and attach the image for you to analyze.
+
+    Use to answer visual questions about what the robot can see. The actual
+    image is provided with the tool result; describe only what it supports.
+    Call again when a current view is needed rather than relying on an old image.
+    """
+    await _invoke(params, "get_camera_image")
+
+
 robot_functions = [
+    get_camera_image,
     cmd_vel,
     navigate_to,
     cancel_navigation,

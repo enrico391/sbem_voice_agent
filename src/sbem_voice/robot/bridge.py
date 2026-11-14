@@ -21,13 +21,16 @@ class RosbridgeClient:
         self.services = {}
         self.cache = {}
         self.changed = {config.battery["topic"]: asyncio.Event()}
+        self._camera_lock = asyncio.Lock()
+        self._camera_pending = None
 
     async def __aenter__(self):
         try:
             self.socket = await connect(
                 self.config.url,
                 open_timeout=self.config.connect_timeout_secs,
-                max_size=2**20,
+                # Raw camera images travel as base64; allow a full HD color frame.
+                max_size=2**24,
                 max_queue=16,
             )
             self.connected = True
@@ -103,7 +106,18 @@ class RosbridgeClient:
                 if not isinstance(message, dict):
                     continue
                 op = message.get("op")
-                if op == "publish" and message.get("topic") in self.changed:
+                if self._camera_pending and (
+                    (op == "publish" and message.get("topic") == self.config.camera["topic"])
+                    or (
+                        op == "status"
+                        and message.get("id") == self._camera_pending[0]
+                        and message.get("level") == "error"
+                    )
+                ):
+                    future = self._camera_pending[1]
+                    if not future.done():
+                        future.set_result(message)
+                elif op == "publish" and message.get("topic") in self.changed:
                     topic = message["topic"]
                     self.cache[topic] = (time.monotonic(), message.get("msg", {}))
                     self.changed[topic].set()
@@ -134,6 +148,42 @@ class RosbridgeClient:
             for future in self.services.values():
                 if not future.done():
                     future.set_result({"op": "disconnected"})
+            if self._camera_pending and not self._camera_pending[1].done():
+                self._camera_pending[1].set_result({"op": "disconnected"})
+
+    async def camera_snapshot(self):
+        """Subscribe on demand for one newly received frame, then unsubscribe."""
+        camera = self.config.camera
+        async with asyncio.timeout(camera["timeout_secs"]), self._camera_lock:
+            request_id = uuid.uuid4().hex
+            future = asyncio.get_running_loop().create_future()
+            self._camera_pending = (request_id, future)
+            try:
+                await self.send(
+                    {
+                        "op": "subscribe",
+                        "id": request_id,
+                        "topic": camera["topic"],
+                        "type": "sensor_msgs/msg/Image",
+                        "throttle_rate": 1000,
+                        "queue_length": 1,
+                    }
+                )
+                message = await future
+                if message["op"] == "disconnected":
+                    raise ConnectionError("Rosbridge disconnected; camera image unavailable")
+                if message["op"] == "status":
+                    raise RuntimeError("Camera subscription rejected")
+                return message.get("msg")
+            finally:
+                self._camera_pending = None
+                if not future.done():
+                    future.cancel()
+                if self.connected:
+                    async with asyncio.timeout(self.config.connect_timeout_secs):
+                        await self.send(
+                            {"op": "unsubscribe", "id": request_id, "topic": camera["topic"]}
+                        )
 
     async def call_service(self, service, arguments):
         """Correlate one service reply; never retry a request with an uncertain outcome."""

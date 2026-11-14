@@ -38,6 +38,10 @@ def _cmd_vel_defaults():
     }
 
 
+def _camera_defaults():
+    return {"topic": "/camera/image_raw", "timeout_secs": 5, "max_dimension": 1024}
+
+
 @dataclass(frozen=True)
 class RobotConfig:
     url: str
@@ -53,6 +57,7 @@ class RobotConfig:
     feedback_interval_secs: float = 15
     feedback_max_updates: int = 3
     cmd_vel: dict = dataclass_field(default_factory=_cmd_vel_defaults)
+    camera: dict = dataclass_field(default_factory=_camera_defaults)
 
     @classmethod
     def load(cls, path: Path):
@@ -80,6 +85,21 @@ class RobotConfig:
             limit = data.get("feedback_max_updates", 3)
             if type(limit) is not int or not 0 <= limit <= 100:
                 raise ValueError("feedback_max_updates must be an integer from 0 to 100")
+            camera = data.get("camera", _camera_defaults())
+            if not isinstance(camera, dict) or set(camera) != set(_camera_defaults()):
+                raise ValueError("Invalid camera configuration")
+            if not _text(camera["topic"]) or not camera["topic"].startswith("/"):
+                raise ValueError("camera.topic must be an absolute topic name")
+            timeout = camera["timeout_secs"]
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not math.isfinite(timeout)
+                or timeout <= 0
+            ):
+                raise ValueError("camera.timeout_secs must be positive and finite")
+            if type(camera["max_dimension"]) is not int or not 1 <= camera["max_dimension"] <= 2048:
+                raise ValueError("camera.max_dimension must be an integer from 1 to 2048")
             velocity = data.get("cmd_vel", _cmd_vel_defaults())
             if not isinstance(velocity, dict) or set(velocity) != set(_cmd_vel_defaults()):
                 raise ValueError("Invalid cmd_vel configuration")

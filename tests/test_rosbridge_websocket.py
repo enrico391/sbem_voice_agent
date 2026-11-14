@@ -1,17 +1,62 @@
 """Exercise the actual WebSocket client against a local protocol fixture."""
 
 import asyncio
+import base64
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
 from websockets.asyncio.server import serve
 
 from sbem_voice.robot.tools import connect_robot
 
 
 class WebSocketTests(unittest.IsolatedAsyncioTestCase):
+    async def test_camera_snapshot_larger_than_one_megabyte_over_real_socket(self):
+        unsubscribed = asyncio.Event()
+        image = {
+            "width": 640,
+            "height": 480,
+            "encoding": "rgb8",
+            "step": 640 * 3,
+            "is_bigendian": 0,
+            "data": base64.b64encode(b"\x80" * (640 * 480 * 3)).decode(),
+        }
+
+        async def server(socket):
+            async for raw in socket:
+                message = json.loads(raw)
+                if message["op"] == "subscribe" and message["topic"] == "/camera/image_raw":
+                    payload = json.dumps(
+                        {
+                            "op": "publish",
+                            "topic": message["topic"],
+                            "msg": image,
+                        }
+                    )
+                    self.assertGreater(len(payload), 2**20)
+                    await socket.send(payload)
+                elif message["op"] == "unsubscribe":
+                    unsubscribed.set()
+
+        async with serve(server, "127.0.0.1", 0) as fixture:
+            port = fixture.sockets[0].getsockname()[1]
+            with tempfile.TemporaryDirectory() as tmp:
+                data = json.loads(Path("config/robot.example.json").read_text())
+                data["url"] = f"ws://127.0.0.1:{port}"
+                path = Path(tmp) / "robot.json"
+                path.write_text(json.dumps(data))
+                async with connect_robot(path) as robot:
+                    jpeg, size = await asyncio.wait_for(robot.get_camera_image(), 3)
+                    self.assertEqual(size, (640, 480))
+                    with Image.open(io.BytesIO(jpeg)) as snapshot:
+                        self.assertEqual(snapshot.format, "JPEG")
+                        self.assertEqual(snapshot.size, size)
+                    await asyncio.wait_for(unsubscribed.wait(), 1)
+
     async def test_subscriptions_and_pushed_motion_result_over_real_socket(self):
         received = []
 
