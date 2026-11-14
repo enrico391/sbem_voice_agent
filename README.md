@@ -26,7 +26,7 @@ so ROS Humble's Python 3.10 bindings do not need to be imported into the voice a
   synthesis through Cartesia or Deepgram.
 - Follow-up conversations with a configurable inactivity timeout.
 - Persistent SQLite memory with tools to remember, retrieve, correct, and forget facts.
-- Six focused robot tools, with pushed progress and completion updates.
+- Eight focused robot tools, with pushed progress and completion updates.
 - Position storage and lookup through SBEM's waypoint manager.
 - PulseAudio echo cancellation for the Kinect microphone and Logitech speaker.
 - Offline regression tests and a local WebSocket integration fixture.
@@ -262,6 +262,9 @@ and battery endpoints must be checked against your deployment.
 | `waypoint_manager.services.*` | Save, list, and get service names and types |
 | `waypoint_manager.map_id` | Empty for the current map; explicit ID for saved-map list/get requests |
 | `battery` | Topic, message type, dotted field paths, and percentage scale |
+| `cmd_vel.topic` | Direct velocity topic using `geometry_msgs/msg/Twist`; default `/cmd_vel` |
+| `cmd_vel.max_linear_x`, `cmd_vel.max_angular_z` | Absolute speed limits; defaults `0.2` m/s and `0.5` rad/s |
+| `cmd_vel.max_duration_secs`, `cmd_vel.publish_rate_hz` | Command duration limit and publishing rate; defaults `5` seconds and `10` Hz (maximum `100` Hz) |
 | `connect_timeout_secs`, `service_timeout_secs`, `action_timeout_secs` | Request deadlines |
 | `telemetry_timeout_secs`, `telemetry_max_age_secs` | Battery wait timeout and maximum receipt age |
 | `feedback_interval_secs` | Minimum interval between progress updates; default `15` |
@@ -301,6 +304,7 @@ Keep those processes running, then start the voice assistant in another terminal
 | `store_position(name)` | Saves the current pose through `save_location` with `overwrite: false` |
 | `navigate_to(position_name)` | Retrieves the pose through `get_location`, then sends a navigation action |
 | `cancel_navigation()` | Requests cancellation of this session's current navigation; its final outcome arrives through `navigate_to` |
+| `cmd_vel(linear_x, angular_z, duration_secs=1)` | Publishes bounded direct velocity for a short duration, then sends zero velocity; both speeds zero requests an early stop |
 | `dock()` | Runs the configured docking action |
 | `undock()` | Runs the configured undocking action |
 | `get_battery_status()` | Returns fresh battery percentage, voltage, and charging status when available |
@@ -338,6 +342,24 @@ only; it does not cancel docking or undocking. A confirmed ROS canceled result
 is reported as `canceled`; sending the request reports `cancellation_requested`.
 Cancellation during the saved-position lookup prevents the navigation goal from
 being sent and reports `canceled` when that lookup finishes.
+
+For example, `cmd_vel(0.1, 0, 1)` requests forward motion at 0.1 m/s for one
+second; `cmd_vel(0, -0.3, 1)` requests a right turn. Negative `linear_x` moves
+backward; positive `angular_z` turns left. The other axes are always zero.
+Commands outside the configured limits are rejected. Existing configurations
+without a `cmd_vel` block use the defaults above; add the block from the example
+to change them. The velocity topic must accept `Twist`, not `TwistStamped`.
+
+Direct velocity shares the motion lock with navigation, docking, and undocking.
+`cmd_vel(0, 0)` ends this session's active velocity stream early; it does not
+cancel navigation or docking. The stream also attempts to send zero velocity
+on cancellation or app shutdown. A `command_sent` result confirms only that the
+commands were sent to rosbridge, and `stop_requested` means the active stream
+was signaled to end; neither verifies physical movement or stopping. Connection
+or send failures leave motion uncertain and block further nonzero commands.
+Keep the base controller's command timeout enabled so it stops if the connection
+or process is lost. Coordinate the velocity topic or command multiplexer with
+other robot controllers; the app's motion lock only covers its own commands.
 A disconnected bridge invalidates telemetry; restart the app to reconnect.
 
 ## Troubleshooting

@@ -44,6 +44,7 @@ class RobotTools:
         self.motion_uncertain = False
         self.current_motion = None
         self.navigation_cancel_requested = False
+        self._cmd_vel_stop = None
 
     @staticmethod
     def _name(name):
@@ -116,6 +117,75 @@ class RobotTools:
         self.navigation_cancel_requested = True
         await self.bridge.cancel_action(self.config.actions["navigate_to"]["name"])
         return {"status": "cancellation_requested", "operation": "navigate_to"}
+
+    async def cmd_vel(self, linear_x, angular_z, duration_secs=1.0):
+        limits = self.config.cmd_vel
+        for name, value in (("linear_x", linear_x), ("angular_z", angular_z)):
+            if not _number(value) or abs(value) > limits[f"max_{name}"]:
+                raise ValueError(f"{name} must be finite and within +/-{limits[f'max_{name}']}")
+        moving = linear_x != 0 or angular_z != 0
+        if moving and (
+            not _number(duration_secs) or not 0 < duration_secs <= limits["max_duration_secs"]
+        ):
+            raise ValueError(
+                f"duration_secs must be positive and at most {limits['max_duration_secs']}"
+            )
+        if not moving and self._cmd_vel_stop is not None:
+            self._cmd_vel_stop.set()
+            return {"status": "stop_requested", "operation": "cmd_vel"}
+        if self.motion_lock.locked():
+            raise ValueError("Another motion is in progress")
+        if moving and self.motion_uncertain:
+            raise ValueError(
+                "Previous motion outcome unknown; check robot and restart before moving"
+            )
+
+        async with self.motion_lock:
+            self.current_motion = "cmd_vel"
+            self._cmd_vel_stop = asyncio.Event()
+            try:
+                try:
+                    if moving:
+                        loop = asyncio.get_running_loop()
+                        deadline = loop.time() + duration_secs
+                        interval = 1 / limits["publish_rate_hz"]
+                        while not self._cmd_vel_stop.is_set() and loop.time() < deadline:
+                            await self.bridge.publish_velocity(linear_x, angular_z)
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                break
+                            try:
+                                await asyncio.wait_for(
+                                    self._cmd_vel_stop.wait(), min(interval, remaining)
+                                )
+                            except TimeoutError:
+                                pass
+                finally:
+                    # Stop before releasing the lock, including cancellation and shutdown.
+                    await self._stop_velocity()
+            except (TimeoutError, ConnectionError, OSError, RuntimeError, asyncio.CancelledError):
+                self.motion_uncertain = True
+                raise
+            finally:
+                self._cmd_vel_stop = None
+                self.current_motion = None
+        return {"status": "command_sent", "operation": "cmd_vel"}
+
+    async def _stop_velocity(self):
+        # The bridge bounds this send by connect_timeout_secs. Hold the motion
+        # lock until it settles, even if worker shutdown cancels us repeatedly.
+        stop = asyncio.create_task(self.bridge.publish_velocity(0.0, 0.0), name="cmd-vel-stop")
+        cancelled = False
+        while not stop.done():
+            try:
+                await asyncio.shield(stop)
+            except asyncio.CancelledError:
+                if stop.cancelled():
+                    raise
+                cancelled = True
+        stop.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def motion(self, operation, position_name=None, progress=None):
         if self.motion_uncertain:
@@ -191,7 +261,7 @@ async def _invoke(params, operation, *args):
             "reason": (
                 "Timed out. Motion outcome may be unknown; a cancellation request "
                 "does not confirm the robot stopped."
-                if operation in ("navigate_to", "dock", "undock")
+                if operation in ("navigate_to", "dock", "undock", "cmd_vel")
                 else "Waypoint or telemetry request timed out; do not assume it succeeded."
             ),
         }
@@ -203,6 +273,24 @@ async def _invoke(params, operation, *args):
             "reason": "Robot connection failed; request outcome may be unknown",
         }
     await params.result_callback(result)
+
+
+@tool_options(cancel_on_interruption=False)
+async def cmd_vel(
+    params: FunctionCallParams, linear_x: float, angular_z: float, duration_secs: float = 1.0
+):
+    """Drive or turn briefly at a bounded velocity, then send a stop command.
+
+    Only use for an explicit user request for relative motion. Never overlap
+    navigation or docking. command_sent confirms sending, not physical movement
+    or a verified stop. To stop an active velocity command, call with both speeds zero.
+
+    Args:
+        linear_x: Forward speed in meters/second; negative means backward.
+        angular_z: Turn speed in radians/second; positive means left, negative right.
+        duration_secs: Duration in seconds, default 1; must fit configured limits.
+    """
+    await _invoke(params, "cmd_vel", linear_x, angular_z, duration_secs)
 
 
 @tool_options(cancel_on_interruption=False)
@@ -258,6 +346,7 @@ async def get_battery_status(params: FunctionCallParams):
 
 
 robot_functions = [
+    cmd_vel,
     navigate_to,
     cancel_navigation,
     dock,

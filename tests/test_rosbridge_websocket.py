@@ -64,6 +64,16 @@ class WebSocketTests(unittest.IsolatedAsyncioTestCase):
                     )
                     result = await asyncio.wait_for(robot.motion("dock"), 2)
                     self.assertEqual(result, {"status": "succeeded", "operation": "dock"})
+                    result = await asyncio.wait_for(robot.cmd_vel(0.1, -0.2, 0.01), 2)
+                    self.assertEqual(result, {"status": "command_sent", "operation": "cmd_vel"})
         self.assertEqual(
-            [m["op"] for m in received], ["subscribe", "call_service", "send_action_goal"]
+            [m["op"] for m in received[:3]],
+            ["subscribe", "call_service", "send_action_goal"],
         )
+        publications = received[3:]
+        self.assertGreaterEqual(len(publications), 2)
+        self.assertTrue(all(message["op"] == "publish" for message in publications))
+        self.assertEqual(received[-2]["msg"]["linear"]["x"], 0.1)
+        self.assertEqual(received[-2]["msg"]["angular"]["z"], -0.2)
+        self.assertEqual(received[-1]["msg"]["linear"]["x"], 0)
+        self.assertEqual(received[-1]["msg"]["angular"]["z"], 0)

@@ -5,6 +5,7 @@ import math
 import os
 import re
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -27,6 +28,16 @@ def _text(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+def _cmd_vel_defaults():
+    return {
+        "topic": "/cmd_vel",
+        "max_linear_x": 0.2,
+        "max_angular_z": 0.5,
+        "max_duration_secs": 5,
+        "publish_rate_hz": 10,
+    }
+
+
 @dataclass(frozen=True)
 class RobotConfig:
     url: str
@@ -41,6 +52,7 @@ class RobotConfig:
     telemetry_max_age_secs: float = 5
     feedback_interval_secs: float = 15
     feedback_max_updates: int = 3
+    cmd_vel: dict = dataclass_field(default_factory=_cmd_vel_defaults)
 
     @classmethod
     def load(cls, path: Path):
@@ -68,6 +80,22 @@ class RobotConfig:
             limit = data.get("feedback_max_updates", 3)
             if type(limit) is not int or not 0 <= limit <= 100:
                 raise ValueError("feedback_max_updates must be an integer from 0 to 100")
+            velocity = data.get("cmd_vel", _cmd_vel_defaults())
+            if not isinstance(velocity, dict) or set(velocity) != set(_cmd_vel_defaults()):
+                raise ValueError("Invalid cmd_vel configuration")
+            if not _text(velocity["topic"]) or not velocity["topic"].startswith("/"):
+                raise ValueError("cmd_vel.topic must be an absolute topic name")
+            for key in set(velocity) - {"topic"}:
+                value = velocity[key]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise ValueError(f"cmd_vel.{key} must be positive and finite")
+            if velocity["publish_rate_hz"] > 100:
+                raise ValueError("cmd_vel.publish_rate_hz must not exceed 100")
             for key in cls.__dataclass_fields__:
                 if key.endswith("_secs") and key in data:
                     value = data[key]

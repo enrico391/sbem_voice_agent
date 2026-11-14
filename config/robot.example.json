@@ -7,6 +7,13 @@
   "telemetry_max_age_secs": 5,
   "feedback_interval_secs": 15,
   "feedback_max_updates": 3,
+  "cmd_vel": {
+    "topic": "/cmd_vel",
+    "max_linear_x": 0.2,
+    "max_angular_z": 0.5,
+    "max_duration_secs": 5,
+    "publish_rate_hz": 10
+  },
   "battery": {
     "topic": "/battery_state",
     "type": "sensor_msgs/msg/BatteryState",

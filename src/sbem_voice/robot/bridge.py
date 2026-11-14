@@ -69,6 +69,23 @@ class RosbridgeClient:
         except Exception as exc:
             raise ConnectionError("Rosbridge disconnected; action outcome may be unknown") from exc
 
+    async def publish_velocity(self, linear_x, angular_z):
+        """Publish an unlatched planar Twist; sending is not a motion acknowledgment."""
+        async with asyncio.timeout(self.config.connect_timeout_secs):
+            await self.send(
+                {
+                    "op": "publish",
+                    "topic": self.config.cmd_vel["topic"],
+                    "type": "geometry_msgs/msg/Twist",
+                    "latch": False,
+                    "queue_size": 1,
+                    "msg": {
+                        "linear": {"x": linear_x, "y": 0.0, "z": 0.0},
+                        "angular": {"x": 0.0, "y": 0.0, "z": angular_z},
+                    },
+                }
+            )
+
     @staticmethod
     def _offer(queue, message):
         # Keep only the newest feedback; a final result always replaces feedback.

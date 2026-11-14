@@ -114,6 +114,220 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.incoming.put({"op": "publish", "topic": topic, "msg": msg})
         await asyncio.sleep(0)
 
+    async def test_cmd_vel_streams_twist_then_sends_zero(self):
+        command = next((fn for fn in robot_functions if fn.__name__ == "cmd_vel"), None)
+        self.assertIsNotNone(command, "cmd_vel must be available to the LLM")
+        results = []
+
+        async def callback(value):
+            results.append(value)
+
+        params = SimpleNamespace(
+            app_resources=SimpleNamespace(robot=self.robot), result_callback=callback
+        )
+        await command(params, 0.1, -0.2, 0.12)
+        messages = []
+        while not self.socket.sent.empty():
+            messages.append(self.socket.sent.get_nowait())
+        self.assertGreaterEqual(len(messages), 3)
+        for message in messages:
+            self.assertEqual(message["op"], "publish")
+            self.assertEqual(message["topic"], "/cmd_vel")
+            self.assertEqual(message["type"], "geometry_msgs/msg/Twist")
+            self.assertFalse(message["latch"])
+            self.assertEqual(message["queue_size"], 1)
+        self.assertEqual(
+            messages[0]["msg"],
+            {
+                "linear": {"x": 0.1, "y": 0.0, "z": 0.0},
+                "angular": {"x": 0.0, "y": 0.0, "z": -0.2},
+            },
+        )
+        self.assertEqual(
+            messages[-1]["msg"],
+            {
+                "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+            },
+        )
+        self.assertEqual(results, [{"status": "command_sent", "operation": "cmd_vel"}])
+        self.assertIsNone(self.robot.current_motion)
+        self.assertFalse(self.robot.motion_lock.locked())
+
+    async def test_cmd_vel_rejects_invalid_or_excessive_commands_without_publishing(self):
+        self.assertTrue(hasattr(self.robot, "cmd_vel"), "cmd_vel implementation is missing")
+        for args in (
+            (float("nan"), 0, 1),
+            (0, float("inf"), 1),
+            (True, 0, 1),
+            ("0.1", 0, 1),
+            (0.21, 0, 1),
+            (-0.21, 0, 1),
+            (0, 0.51, 1),
+            (0, -0.51, 1),
+            (0.1, 0, 0),
+            (0.1, 0, -1),
+            (0.1, 0, 5.1),
+            (0.1, 0, float("nan")),
+            (0.1, 0, True),
+        ):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                await self.robot.cmd_vel(*args)
+        self.assertTrue(self.socket.sent.empty())
+
+    async def test_cmd_vel_and_actions_share_motion_lock(self):
+        self.assertTrue(hasattr(self.robot, "cmd_vel"), "cmd_vel implementation is missing")
+        command = asyncio.create_task(self.robot.cmd_vel(0.1, 0, 0.12))
+        await asyncio.wait_for(self.socket.sent.get(), 1)
+        with self.assertRaisesRegex(ValueError, "motion"):
+            await self.robot.motion("dock")
+        with self.assertRaisesRegex(ValueError, "motion"):
+            await self.robot.cmd_vel(0.1, 0, 0.01)
+        await command
+        while not self.socket.sent.empty():
+            self.socket.sent.get_nowait()
+        docking = asyncio.create_task(self.robot.motion("dock"))
+        goal = await asyncio.wait_for(self.socket.sent.get(), 1)
+        with self.assertRaisesRegex(ValueError, "motion"):
+            await self.robot.cmd_vel(0.1, 0, 0.01)
+        with self.assertRaisesRegex(ValueError, "motion"):
+            await self.robot.cmd_vel(0, 0)
+        await self.socket.incoming.put(
+            {"op": "action_result", "id": goal["id"], "status": 4, "result": True, "values": {}}
+        )
+        await docking
+
+    async def test_zero_cmd_vel_stops_current_velocity_stream(self):
+        self.assertTrue(hasattr(self.robot, "cmd_vel"), "cmd_vel implementation is missing")
+        command = asyncio.create_task(self.robot.cmd_vel(0.1, 0, 5))
+        await asyncio.wait_for(self.socket.sent.get(), 1)
+        self.assertEqual(
+            await self.robot.cmd_vel(0, 0),
+            {
+                "status": "stop_requested",
+                "operation": "cmd_vel",
+            },
+        )
+        await asyncio.wait_for(command, 1)
+        stop = await asyncio.wait_for(self.socket.sent.get(), 1)
+        self.assertEqual(stop["msg"]["linear"]["x"], 0)
+        self.assertEqual(stop["msg"]["angular"]["z"], 0)
+        self.assertTrue(self.socket.sent.empty())
+
+    async def test_cancelled_cmd_vel_sends_zero_before_releasing_motion_lock(self):
+        self.assertTrue(hasattr(self.robot, "cmd_vel"), "cmd_vel implementation is missing")
+        command = asyncio.create_task(self.robot.cmd_vel(0.1, 0, 5))
+        await asyncio.wait_for(self.socket.sent.get(), 1)
+        command.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await command
+        stop = await asyncio.wait_for(self.socket.sent.get(), 1)
+        self.assertEqual(stop["msg"]["linear"]["x"], 0)
+        self.assertFalse(self.robot.motion_lock.locked())
+
+    async def test_stop_ignores_duration_with_subsecond_configured_limit(self):
+        self.robot.config = replace(
+            self.config, cmd_vel={**self.config.cmd_vel, "max_duration_secs": 0.5}
+        )
+        command = asyncio.create_task(self.robot.cmd_vel(0.1, 0, 0.5))
+        await asyncio.wait_for(self.socket.sent.get(), 1)
+        try:
+            self.assertEqual((await self.robot.cmd_vel(0, 0))["status"], "stop_requested")
+            await asyncio.wait_for(command, 1)
+        finally:
+            if not command.done():
+                command.cancel()
+            await asyncio.gather(command, return_exceptions=True)
+
+    async def test_cancellation_during_final_zero_waits_for_bounded_stop_send(self):
+        original_send = self.socket.send
+        stopping = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_stop(message):
+            data = json.loads(message)
+            if data.get("op") == "publish" and data["msg"]["linear"]["x"] == 0:
+                stopping.set()
+                await release.wait()
+            await original_send(message)
+
+        with patch.object(self.socket, "send", side_effect=delayed_stop):
+            command = asyncio.create_task(self.robot.cmd_vel(0.1, 0, 0.01))
+            try:
+                await asyncio.wait_for(stopping.wait(), 1)
+                for _ in range(2):
+                    command.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(command.done(), "Cancellation must wait for the stop send")
+                    self.assertTrue(self.robot.motion_lock.locked())
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await command
+            finally:
+                release.set()
+                await asyncio.gather(command, return_exceptions=True)
+        self.socket.sent.get_nowait()  # initial nonzero command
+        stop = self.socket.sent.get_nowait()
+        self.assertEqual(stop["msg"]["linear"]["x"], 0)
+        self.assertFalse(self.robot.motion_lock.locked())
+
+    async def test_failed_final_zero_is_not_success_and_blocks_motion(self):
+        original_send = self.socket.send
+
+        async def fail_stop(message):
+            data = json.loads(message)
+            if data.get("op") == "publish" and data["msg"]["linear"]["x"] == 0:
+                raise OSError("stop failed")
+            await original_send(message)
+
+        with patch.object(self.socket, "send", side_effect=fail_stop):
+            with self.assertRaises(ConnectionError):
+                await self.robot.cmd_vel(0.1, 0, 0.01)
+        self.assertTrue(self.robot.motion_uncertain)
+        self.assertFalse(self.robot.motion_lock.locked())
+
+    async def test_cancelled_final_zero_still_has_a_send_deadline(self):
+        self.bridge.config = replace(self.config, connect_timeout_secs=0.03)
+        original_send = self.socket.send
+        stopping = asyncio.Event()
+
+        async def blocked_stop(message):
+            data = json.loads(message)
+            if data.get("op") == "publish" and data["msg"]["linear"]["x"] == 0:
+                stopping.set()
+                await asyncio.Event().wait()
+            await original_send(message)
+
+        with patch.object(self.socket, "send", side_effect=blocked_stop):
+            command = asyncio.create_task(self.robot.cmd_vel(0.1, 0, 0.01))
+            await asyncio.wait_for(stopping.wait(), 1)
+            command.cancel()
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(command, 0.5)
+        self.assertTrue(self.robot.motion_uncertain)
+        self.assertFalse(self.robot.motion_lock.locked())
+
+    async def test_cmd_vel_connection_failure_blocks_subsequent_motion(self):
+        command = next((fn for fn in robot_functions if fn.__name__ == "cmd_vel"), None)
+        self.assertIsNotNone(command, "cmd_vel must be available to the LLM")
+        results = []
+
+        async def callback(value):
+            results.append(value)
+
+        params = SimpleNamespace(
+            app_resources=SimpleNamespace(robot=self.robot), result_callback=callback
+        )
+        with patch.object(self.socket, "send", side_effect=OSError("broken connection")):
+            await command(params, 0.1, 0, 0.01)
+        self.assertEqual(results[0]["status"], "error")
+        self.assertTrue(self.robot.motion_uncertain)
+        self.assertFalse(self.robot.motion_lock.locked())
+        with self.assertRaisesRegex(ValueError, "outcome unknown"):
+            await self.robot.motion("dock")
+        with self.assertRaisesRegex(ValueError, "outcome unknown"):
+            await self.robot.cmd_vel(0.1, 0)
+
     async def test_store_current_pose_list_and_navigate(self):
         self.assertEqual(
             await self.robot.store_position("kitchen"), {"status": "stored", "name": "kitchen"}
@@ -408,6 +622,7 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         try:
             llm._sync_registered_tool_handlers(LLMContext(tools=robot_functions).tools)
             self.assertTrue(llm._function_is_async("store_position"))
+            self.assertTrue(llm._function_is_async("cmd_vel"))
             self.assertFalse(llm._function_is_async("get_positions"))
         finally:
             await llm._client.close()
@@ -439,7 +654,7 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         from pipecat.processors.aggregators.llm_context import LLMContext
 
         context = LLMContext(tools=robot_functions)
-        self.assertEqual(len(context.tools.standard_tools), 7)
+        self.assertEqual(len(context.tools.standard_tools), 8)
         updates = []
 
         async def callback(value, *, properties=None):
@@ -471,6 +686,42 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_cmd_vel_defaults_keep_older_configs_compatible(self):
+        data = json.loads(Path("config/robot.example.json").read_text())
+        data.pop("cmd_vel", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "robot.json"
+            path.write_text(json.dumps(data))
+            config = RobotConfig.load(path)
+        self.assertEqual(config.cmd_vel["topic"], "/cmd_vel")
+        self.assertEqual(config.cmd_vel["max_linear_x"], 0.2)
+
+    def test_rejects_invalid_cmd_vel_configuration(self):
+        original = json.loads(Path("config/robot.example.json").read_text())
+        original["cmd_vel"] = {
+            "topic": "/cmd_vel",
+            "max_linear_x": 0.2,
+            "max_angular_z": 0.5,
+            "max_duration_secs": 5,
+            "publish_rate_hz": 10,
+        }
+        invalid = [None, {}, {**original["cmd_vel"], "unknown": True}]
+        for key, values in {
+            "topic": ["", "relative/topic", 12],
+            "max_linear_x": [0, -1, True, "1", float("nan")],
+            "max_angular_z": [0, -1, float("inf")],
+            "max_duration_secs": [0, -1, True],
+            "publish_rate_hz": [0, -1, 101, False],
+        }.items():
+            invalid.extend({**original["cmd_vel"], key: value} for value in values)
+        for block in invalid:
+            data = {**original, "cmd_vel": block}
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "robot.json"
+                path.write_text(json.dumps(data))
+                with self.subTest(block=block), self.assertRaises(ValueError):
+                    RobotConfig.load(path)
+
     def test_rejects_invalid_robot_configuration(self):
         original = json.loads(Path("config/robot.example.json").read_text())
         for key, value in [
