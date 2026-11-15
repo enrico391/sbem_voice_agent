@@ -24,6 +24,16 @@ def _path(root: Path, name: str) -> Path | None:
     return (root / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise ValueError("API_PORT must be an integer from 1 to 65535") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("API_PORT must be an integer from 1 to 65535")
+    return port
+
+
 @dataclass(frozen=True)
 class Settings:
     root: Path
@@ -42,9 +52,19 @@ class Settings:
     memory_db_path: Path
     memory_user_id: str
     session_timeout_secs: float
+    api_enabled: bool = False
+    api_host: str = "0.0.0.0"
+    api_port: int = 8765
+    api_token: str = ""
 
     @classmethod
     def from_env(cls, root: Path) -> "Settings":
+        api_enabled = os.getenv("API_ENABLED", "false").strip().lower()
+        if api_enabled not in ("true", "false", "1", "0"):
+            raise ValueError("API_ENABLED must be true, false, 1 or 0")
+        api_host = os.getenv("API_HOST", "0.0.0.0").strip()
+        if not api_host:
+            raise ValueError("API_HOST must not be empty")
         if (
             os.getenv("MCP_SERVERS_CONFIG", "").strip()
             and not os.getenv("ROBOT_CONFIG", "").strip()
@@ -82,6 +102,10 @@ class Settings:
             or (root / "data/memory.sqlite3").resolve(),
             memory_user_id=memory_user_id,
             session_timeout_secs=_positive_float("SESSION_TIMEOUT_SECS", "300"),
+            api_enabled=api_enabled in ("true", "1"),
+            api_host=api_host,
+            api_port=_port(os.getenv("API_PORT", "8765")),
+            api_token=os.getenv("API_TOKEN", "").strip(),
         )
 
     def load_system_prompt(self) -> str:
@@ -96,7 +120,16 @@ class Settings:
             raise ValueError(f"The system prompt file is empty: {self.system_prompt_file}")
         return prompt
 
-    def validate_runtime(self) -> None:
+    def validate_runtime(self, *, audio: bool = True) -> None:
+        if not audio:
+            if not self.openrouter_api_key:
+                raise ValueError("Set the following API keys in .env: OPENROUTER_API_KEY")
+            if self.robot_config is not None:
+                from sbem_voice.robot.config import RobotConfig
+
+                RobotConfig.load(self.robot_config)
+            self.load_system_prompt()
+            return
         path = self.wakeword_model_path
         if path is None or not path.is_file() or path.suffix.lower() != ".onnx":
             raise ValueError("Set WAKEWORD_MODEL_PATH to an existing openWakeWord .onnx model")

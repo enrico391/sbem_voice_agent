@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Wake-word activated Pipecat voice interface for SBEM through rosbridge"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "pipecat-ai[cartesia,deepgram,local,openai,silero]==1.13.0",
+    "pipecat-ai[cartesia,deepgram,local,openai,runner,silero,websocket]==1.13.0",
     "websockets>=15,<18",
     "openwakeword==0.6.0",
     "python-dotenv>=1.0,<2",

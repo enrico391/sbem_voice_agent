@@ -1,0 +1,16 @@
+name: api_text
+user:
+  modality: text
+judge:
+  modality: text
+scenarios:
+  - name: text_reply_and_history
+    turns:
+      - user: "Reply with exactly API_READY."
+        expect:
+          - event: response
+            text_contains: "API_READY"
+      - user: "Which exact marker did I ask you to reply with in my previous message?"
+        expect:
+          - event: response
+            text_contains: "API_READY"

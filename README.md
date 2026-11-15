@@ -25,6 +25,8 @@ so ROS Humble's Python 3.10 bindings do not need to be imported into the voice a
 - Speech recognition through Deepgram, conversation through OpenRouter, and speech
   synthesis through Cartesia or Deepgram.
 - Follow-up conversations with a configurable inactivity timeout.
+- Optional streaming text API over WebSocket/RTVI, with independent conversation
+  history per connection and an API-only mode requiring no audio hardware.
 - Persistent SQLite memory with tools to remember, retrieve, correct, and forget facts.
 - Nine focused robot tools, with pushed progress and completion updates.
 - Position storage and lookup through SBEM's waypoint manager.
@@ -112,6 +114,10 @@ variables take precedence. Relative file paths resolve from the project root.
 | `ROBOT_CONFIG` | Robot interface configuration | Unset; conversation only |
 | `MEMORY_DB_PATH` | Persistent SQLite memory file, relative to the project root | `data/memory.sqlite3` |
 | `MEMORY_USER_ID` | Application-selected memory profile | `default` |
+| `API_ENABLED` | Enable the WebSocket API alongside voice (`true`/`false`) | `false` |
+| `API_HOST` | API bind address | `0.0.0.0` |
+| `API_PORT` | API listening port, 1–65535 | `8765` |
+| `API_TOKEN` | Optional token required as `Authorization: Bearer <token>` | Unset |
 
 Edit [config/system_prompt.md](config/system_prompt.md) to change the assistant's
 role, language, or speaking style. Keep the spoken-output and tool-result rules.
@@ -192,6 +198,81 @@ tool results finish, then returns to wake-word listening. The next wake starts a
 fresh conversation. It does not shut down the app or cancel robot motion.
 
 Press **Ctrl+C** to stop.
+
+### Streaming text API
+
+Enable the API alongside the microphone:
+
+```bash
+uv run bot.py --api
+# With echo cancellation: ./sys_services_audio/run_with_audio.sh --api
+```
+
+Or run just the API, without microphone/speaker access, a wake-word model, STT or
+TTS credentials. Only `OPENROUTER_API_KEY` is required for conversation:
+
+```bash
+uv run bot.py --api-only --api-port 8765
+```
+
+`API_ENABLED=true` in `.env` is equivalent to `--api`. `--api-host` and `--api-port`
+override the environment settings. The API binds all network interfaces
+(`0.0.0.0`) by default. Connect locally at `ws://127.0.0.1:8765/ws` or remotely at
+`ws://<robot-ip>:8765/ws`. Set `API_TOKEN` to require a bearer token; remote deployments should
+use a TLS reverse proxy (`wss://`). The example Python client reads `API_TOKEN`
+from its environment and streams until **Ctrl+C**:
+
+```bash
+uv run python examples/api_client.py "What can you help me with?"
+# Custom address:
+uv run python examples/api_client.py --url ws://127.0.0.1:9000/ws "Hello"
+```
+
+The wire format is **JSON RTVI 2.2.0**, using Pipecat's native
+`FastAPIWebsocketTransport`, `RTVIProcessor`, and `RTVIObserver`. No Protobuf or
+Pipecat client SDK is required. First send a handshake and wait for `bot-ready`:
+
+```json
+{"label":"rtvi-ai","type":"client-ready","id":"ready","data":{"version":"2.2.0"}}
+```
+
+Then send text; repeat on the same connection for follow-up messages:
+
+```json
+{"label":"rtvi-ai","type":"send-text","id":"request-1","data":{"content":"What is the battery level?","options":{"audio_response":false}}}
+```
+
+Text streams back as `llm-raw-text` events whose `data.text` contains each chunk.
+`bot-llm-started` / `bot-llm-stopped` bracket individual model generations. Tool
+events include `llm-function-call-in-progress` and `llm-function-call-stopped`,
+with function names and call IDs; arguments and results are not exposed in those
+events. `user-input` acknowledges typed input with `data.msg_id`. Text chunks
+and generation events are connection-scoped, without a per-request ID: keep one
+active request per connection unless deliberately interrupting it.
+
+An LLM generation ending does **not** mean a background robot action has finished.
+Keep reading: tool progress/results can trigger additional replies. A new
+`send-text` interrupts the current reply by default (`run_immediately: true`);
+`run_immediately: false` appends context without requesting a reply. This follows
+native RTVI behavior. Requests are text-only: omit options or set
+`audio_response: false`. Malformed input returns `error-response`; provider
+failures may produce RTVI `error` events. Messages are limited to 64 KiB on the
+wire and 16,000 characters of input text.
+
+Every connection has an independent LLM context, including from microphone
+conversations. Reconnecting starts fresh. API history lasts for the connection;
+the microphone's idle-history reset does not apply. Saved SQLite memories still
+use the configured `MEMORY_USER_ID` across interfaces; this is conversation
+separation, not separate user accounts. All interfaces share one robot connection
+and motion lock, so competing motion commands are rejected. Closing a connection
+tears down its pipeline, not other conversations. It does not guarantee stopping
+robot motion; request cancellation explicitly and check the result.
+
+Close the WebSocket to end a session, or send:
+
+```json
+{"label":"rtvi-ai","type":"disconnect-bot","id":"bye"}
+```
 
 ### Persistent memory
 
@@ -445,17 +526,38 @@ Run the offline suite and Python checks:
 
 ```bash
 uv run python tests/run.py
-uv run ruff check src tests bot.py
-uv run ruff format --check src tests bot.py
+uv run ruff check src tests examples evals bot.py
+uv run ruff format --check src tests examples evals bot.py
 ```
 
 The tests cover wake-word gating, session timing, audio service behavior, robot
-tool handling, and rosbridge communication, including a localhost WebSocket
-fixture. They require no API keys, wake models, audio hardware, ROS installation,
+tool handling, and rosbridge communication, plus real API WebSockets, streamed
+text/tool replies, history isolation, authorization and API-only CLI startup.
+They require no API keys, wake models, audio hardware, ROS installation,
 or robot. The WebSocket fixture requires permission to bind a localhost port.
 
 Validate real wake-word detection, acoustic echo cancellation, speech providers,
 and robot actions separately on the target hardware.
+
+For a live, headless text check, run the same API pipeline through Pipecat's
+native eval transport in a separate development server. This costs two requests
+to the configured LLM. No speech models or judge are needed; the scenario uses
+deterministic text assertions. The eval controls are not exposed on the public
+API endpoint.
+
+```bash
+# Terminal 1: disable robot tools and keep test memories separate.
+ROBOT_CONFIG= MEMORY_DB_PATH=/tmp/sbem-api-eval.sqlite3 \
+  uv run python evals/bot.py --host 127.0.0.1 --port 8766
+
+# Terminal 2: native Pipecat EvalSession library (no CLI extras required).
+uv run python evals/run_text.py
+```
+
+If the `pipecat-ai[evals]` extra is already installed, the equivalent CLI is
+`uv run pipecat eval run evals/api_text.yaml --bot-url ws://127.0.0.1:8766/ws -v`.
+That optional extra includes local speech dependencies; it is not needed for
+the API or the supplied text-only runner.
 
 ## Project structure
 
@@ -465,8 +567,11 @@ and robot actions separately on the target hardware.
 ├── config/
 │   ├── robot.example.json     Robot interface configuration template
 │   └── system_prompt.md       Assistant instructions
+├── evals/                     Native headless text eval and development runner
+├── examples/api_client.py     JSON RTVI streaming client
 ├── models/                    Local wake-word models and setup guide
 ├── src/sbem_voice/
+│   ├── api/                   WebSocket server, isolated sessions, JSON serializer
 │   ├── audio/                 Audio transport and speaker muting
 │   ├── memory/                SQLite persistence and native memory tools
 │   ├── robot/                 rosbridge client, configuration, and tools

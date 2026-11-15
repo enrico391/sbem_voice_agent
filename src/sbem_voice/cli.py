@@ -1,14 +1,23 @@
-"""Command-line entry point for the local voice interface."""
+"""Command-line entry point for local voice and optional text API interfaces."""
 
 import argparse
 import asyncio
 import math
+from dataclasses import replace
 from pathlib import Path
 
 
 def main():
-    """Select local audio devices and start without a web server."""
-    parser = argparse.ArgumentParser(description="Talk to Pipecat using local mic and speakers.")
+    """Select local audio, WebSocket API, or both."""
+    parser = argparse.ArgumentParser(description="Talk to SBEM using local audio or its text API.")
+    parser.add_argument(
+        "--api", action="store_true", help="Enable the text WebSocket API with voice"
+    )
+    parser.add_argument(
+        "--api-only", action="store_true", help="Run only the text API; no audio devices needed"
+    )
+    parser.add_argument("--api-host", help="API bind address (default: API_HOST or 0.0.0.0)")
+    parser.add_argument("--api-port", type=int, help="API port (default: API_PORT or 8765)")
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     parser.add_argument(
         "--input-device", type=int, help="Microphone PyAudio index (default: system)"
@@ -40,6 +49,10 @@ def main():
         parser.error("--echo-tail-secs must be finite and non-negative")
     if args.output_sample_rate <= 0:
         parser.error("--output-sample-rate must be positive")
+    if args.api_port is not None and not 1 <= args.api_port <= 65535:
+        parser.error("--api-port must be an integer from 1 to 65535")
+    if args.api_host is not None and not args.api_host.strip():
+        parser.error("--api-host must not be empty")
 
     if args.list_devices:
         import pyaudio
@@ -61,7 +74,6 @@ def main():
         return
 
     from dotenv import load_dotenv
-    from pipecat.runner.types import RunnerArguments
 
     from sbem_voice.config import Settings
 
@@ -69,9 +81,23 @@ def main():
     load_dotenv(root / ".env", override=False)
     try:
         settings = Settings.from_env(root)
-        settings.validate_runtime()
+        settings = replace(
+            settings,
+            api_enabled=args.api or args.api_only or settings.api_enabled,
+            api_host=args.api_host.strip() if args.api_host is not None else settings.api_host,
+            api_port=args.api_port if args.api_port is not None else settings.api_port,
+        )
+        settings.validate_runtime(audio=not args.api_only)
     except ValueError as exc:
         parser.error(str(exc))
+
+    if args.api_only:
+        from sbem_voice.api.server import run_api_only
+
+        asyncio.run(run_api_only(settings))
+        return
+
+    from pipecat.runner.types import RunnerArguments
 
     from sbem_voice.pipeline import bot
 

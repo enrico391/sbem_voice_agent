@@ -113,7 +113,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, settin
 
         await runner.add_workers(worker)
         try:
-            await runner.run()
+            if settings.api_enabled:
+                from sbem_voice.api.server import serve_api
+
+                await serve_api(settings, robot, voice_runner=runner)
+            else:
+                await runner.run()
         finally:
             await session.cleanup()
 

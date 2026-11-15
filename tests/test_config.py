@@ -7,6 +7,53 @@ from sbem_voice.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_api_defaults_and_environment_overrides(self):
+        with patch.dict("os.environ", {}, clear=True):
+            settings = Settings.from_env(Path("/tmp"))
+        self.assertFalse(settings.api_enabled)
+        self.assertEqual(settings.api_host, "0.0.0.0")
+        self.assertEqual(settings.api_port, 8765)
+        self.assertEqual(settings.api_token, "")
+        with patch.dict(
+            "os.environ",
+            {
+                "API_ENABLED": "true",
+                "API_HOST": "0.0.0.0",
+                "API_PORT": "9001",
+                "API_TOKEN": "offline-token",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env(Path("/tmp"))
+        self.assertTrue(settings.api_enabled)
+        self.assertEqual((settings.api_host, settings.api_port), ("0.0.0.0", 9001))
+        self.assertEqual(settings.api_token, "offline-token")
+
+    def test_api_rejects_invalid_port_host_and_enabled_flag(self):
+        for key, values in {
+            "API_PORT": ["0", "-1", "65536", "1.5", "oops"],
+            "API_HOST": ["", "   "],
+            "API_ENABLED": ["perhaps"],
+        }.items():
+            for value in values:
+                with (
+                    self.subTest(key=key, value=value),
+                    patch.dict("os.environ", {key: value}, clear=True),
+                    self.assertRaisesRegex(ValueError, key),
+                ):
+                    Settings.from_env(Path("/tmp"))
+
+    def test_api_only_requires_llm_key_and_prompt_without_speech_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "prompt.md").write_text("Speak briefly.")
+            env = {"SYSTEM_PROMPT_FILE": "prompt.md", "OPENROUTER_API_KEY": "offline-test"}
+            with patch.dict("os.environ", env, clear=True):
+                Settings.from_env(root).validate_runtime(audio=False)
+            with patch.dict("os.environ", {"SYSTEM_PROMPT_FILE": "prompt.md"}, clear=True):
+                with self.assertRaisesRegex(ValueError, "OPENROUTER_API_KEY"):
+                    Settings.from_env(root).validate_runtime(audio=False)
+
     def test_session_timeout_default_and_override(self):
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(Settings.from_env(Path("/tmp")).session_timeout_secs, 300)
