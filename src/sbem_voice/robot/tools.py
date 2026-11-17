@@ -119,6 +119,21 @@ class RobotTools:
             result["charging"] = power_supply_status == 1
         return result
 
+    async def reconnect_robot(self, confirm_stopped=False):
+        """Reconnect resources in place; only explicit stopped confirmation clears uncertainty."""
+        if type(confirm_stopped) is not bool:
+            raise ValueError("confirm_stopped must be a boolean")
+        connected = await self.bridge.reconnect()
+        if connected and confirm_stopped:
+            if self.motion_lock.locked():
+                raise ValueError("Another motion is in progress; wait for it to finish")
+            self.motion_uncertain = False
+        return {
+            "status": "connected" if connected else "disconnected",
+            "retrying": not connected,
+            "motion_recovery_required": self.motion_uncertain,
+        }
+
     async def cancel_navigation(self):
         if self.current_motion != "navigate_to":
             return {"status": "no_active_navigation"}
@@ -145,10 +160,14 @@ class RobotTools:
             raise ValueError("Another motion is in progress")
         if moving and self.motion_uncertain:
             raise ValueError(
-                "Previous motion outcome unknown; check robot and restart before moving"
+                "Previous motion outcome unknown; confirm the robot is physically stopped "
+                "before using reconnect_robot with confirm_stopped=True"
             )
+        if not self.bridge.connected:
+            raise ConnectionError("Rosbridge unavailable; reconnecting in the background")
 
         async with self.motion_lock:
+            socket = self.bridge.socket
             self.current_motion = "cmd_vel"
             self._cmd_vel_stop = asyncio.Event()
             try:
@@ -158,7 +177,9 @@ class RobotTools:
                         deadline = loop.time() + duration_secs
                         interval = 1 / limits["publish_rate_hz"]
                         while not self._cmd_vel_stop.is_set() and loop.time() < deadline:
-                            await self.bridge.publish_velocity(linear_x, angular_z)
+                            await self.bridge.publish_velocity(
+                                linear_x, angular_z, expected_socket=socket
+                            )
                             remaining = deadline - loop.time()
                             if remaining <= 0:
                                 break
@@ -170,7 +191,7 @@ class RobotTools:
                                 pass
                 finally:
                     # Stop before releasing the lock, including cancellation and shutdown.
-                    await self._stop_velocity()
+                    await self._stop_velocity(socket)
             except (TimeoutError, ConnectionError, OSError, RuntimeError, asyncio.CancelledError):
                 self.motion_uncertain = True
                 raise
@@ -179,10 +200,12 @@ class RobotTools:
                 self.current_motion = None
         return {"status": "command_sent", "operation": "cmd_vel"}
 
-    async def _stop_velocity(self):
+    async def _stop_velocity(self, socket):
         # The bridge bounds this send by connect_timeout_secs. Hold the motion
         # lock until it settles, even if worker shutdown cancels us repeatedly.
-        stop = asyncio.create_task(self.bridge.publish_velocity(0.0, 0.0), name="cmd-vel-stop")
+        stop = asyncio.create_task(
+            self.bridge.publish_velocity(0.0, 0.0, expected_socket=socket), name="cmd-vel-stop"
+        )
         cancelled = False
         while not stop.done():
             try:
@@ -198,10 +221,14 @@ class RobotTools:
     async def motion(self, operation, position_name=None, progress=None):
         if self.motion_uncertain:
             raise ValueError(
-                "Previous motion outcome unknown; check robot and restart before moving"
+                "Previous motion outcome unknown; confirm the robot is physically stopped "
+                "before using reconnect_robot with confirm_stopped=True"
             )
         if self.motion_lock.locked():
             raise ValueError("Another motion is in progress")
+        if not self.bridge.connected:
+            raise ConnectionError("Rosbridge unavailable; reconnecting in the background")
+        socket = self.bridge.socket
         action = self.config.actions[operation]
         goal = copy.deepcopy(action["goal"])
 
@@ -226,8 +253,12 @@ class RobotTools:
                     if self.navigation_cancel_requested:
                         return {"status": "canceled", "operation": operation}
                     set_field(goal, action["pose_field"], pose)
+                if not self.bridge.connected or self.bridge.socket is not socket:
+                    raise ConnectionError("Rosbridge changed before the motion was sent; try again")
                 try:
-                    message = await self.bridge.action(action, goal, update if progress else None)
+                    message = await self.bridge.action(
+                        action, goal, update if progress else None, expected_socket=socket
+                    )
                 except (TimeoutError, ConnectionError, RuntimeError, asyncio.CancelledError):
                     self.motion_uncertain = True
                     raise
@@ -295,6 +326,21 @@ async def _invoke(params, operation, *args):
             "reason": "Robot connection failed; request outcome may be unknown",
         }
     await params.result_callback(result)
+
+
+@tool_options(cancel_on_interruption=False)
+async def reconnect_robot(params: FunctionCallParams, confirm_stopped: bool = False):
+    """Reconnect robot tools without restarting the conversation or repeating commands.
+
+    Reconnection normally happens automatically. Use this to request an immediate
+    retry or check recovery. A connected result does not confirm that motion stopped.
+
+    Args:
+        confirm_stopped: Only set true after the user explicitly confirms the robot
+            is physically stopped. Clears an unknown-motion latch when no motion is
+            in progress. Never infer confirmation from a request to reconnect.
+    """
+    await _invoke(params, "reconnect_robot", confirm_stopped)
 
 
 @tool_options(cancel_on_interruption=False)
@@ -378,6 +424,7 @@ async def get_camera_image(params: FunctionCallParams):
 
 
 robot_functions = [
+    reconnect_robot,
     get_camera_image,
     cmd_vel,
     navigate_to,

@@ -28,7 +28,8 @@ so ROS Humble's Python 3.10 bindings do not need to be imported into the voice a
 - Optional streaming text API over WebSocket/RTVI, with independent conversation
   history per connection and an API-only mode requiring no audio hardware.
 - Persistent SQLite memory with tools to remember, retrieve, correct, and forget facts.
-- Nine focused robot tools, with pushed progress and completion updates.
+- Ten focused robot tools, with pushed progress/completion updates and automatic
+  rosbridge reconnection.
 - Position storage and lookup through SBEM's waypoint manager.
 - PulseAudio echo cancellation for the Kinect microphone and Logitech speaker.
 - Offline regression tests and a local WebSocket integration fixture.
@@ -171,6 +172,18 @@ List devices or inspect the command-line options:
 uv run bot.py --list-devices
 uv run bot.py --help
 ```
+
+Select a microphone directly with its current PyAudio index:
+
+```bash
+uv run bot.py --input-device 26
+```
+
+If the microphone rejects the bot's 16 kHz input rate, the transport opens that
+same device at its default hardware rate and resamples to 16 kHz inside the app.
+For example, the USB microphone can capture at 44.1 kHz while wake detection and
+speech recognition still receive 16 kHz audio. Device indices can change between
+runs; check `--list-devices` if an index points to different hardware.
 
 The installed entry point, `uv run sbem-voice`, accepts the same options.
 `--allow-interruptions` enables listening during playback; use it with echo
@@ -349,6 +362,7 @@ and battery endpoints must be checked against your deployment.
 | `cmd_vel.max_linear_x`, `cmd_vel.max_angular_z` | Absolute speed limits; defaults `0.2` m/s and `0.5` rad/s |
 | `cmd_vel.max_duration_secs`, `cmd_vel.publish_rate_hz` | Command duration limit and publishing rate; defaults `5` seconds and `10` Hz (maximum `100` Hz) |
 | `connect_timeout_secs`, `service_timeout_secs`, `action_timeout_secs` | Request deadlines |
+| `reconnect_interval_secs` | Delay between rosbridge reconnect attempts; default `2` seconds |
 | `telemetry_timeout_secs`, `telemetry_max_age_secs` | Battery wait timeout and maximum receipt age |
 | `feedback_interval_secs` | Minimum interval between progress updates; default `15` |
 | `feedback_max_updates` | Maximum progress updates per action; default `3`, or `0` to disable |
@@ -377,12 +391,15 @@ bringup:
 ros2 launch sbem_waypoint_manager waypoint_manager.launch.py
 ```
 
-Keep those processes running, then start the voice assistant in another terminal.
+Start the voice assistant in another terminal. It can also start before rosbridge:
+after one bounded connection attempt it continues with its robot tools registered
+and retries in the background. The ROS services must be available to execute tools.
 
 ### Available tools
 
 | Tool | Behavior |
 | --- | --- |
+| `reconnect_robot(confirm_stopped=false)` | Requests an immediate rosbridge retry without restarting the agent; returns connection and motion-recovery status |
 | `get_positions()` | Lists saved names through `list_locations` |
 | `store_position(name)` | Saves the current pose through `save_location` with `overwrite: false` |
 | `navigate_to(position_name)` | Retrieves the pose through `get_location`, then sends a navigation action |
@@ -447,7 +464,9 @@ coordinate navigation ownership with other clients to avoid preemption.
 Timeout or shutdown requests cancellation of pending actions. A cancellation
 request does not confirm that the robot stopped. Commands are not automatically
 retried. If a motion outcome is unknown, further motion is blocked until the
-robot is checked and the app restarted. `cancel_navigation` targets navigation
+user explicitly confirms the robot is physically stopped and
+`reconnect_robot(confirm_stopped=true)` clears the latch while connected and no
+motion is in progress. Reconnecting alone does not clear it. `cancel_navigation` targets navigation
 only; it does not cancel docking or undocking. A confirmed ROS canceled result
 is reported as `canceled`; sending the request reports `cancellation_requested`.
 Cancellation during the saved-position lookup prevents the navigation goal from
@@ -470,7 +489,25 @@ or send failures leave motion uncertain and block further nonzero commands.
 Keep the base controller's command timeout enabled so it stops if the connection
 or process is lost. Coordinate the velocity topic or command multiplexer with
 other robot controllers; the app's motion lock only covers its own commands.
-A disconnected bridge invalidates telemetry; restart the app to reconnect.
+A disconnected bridge invalidates telemetry and settles pending calls with an
+unknown/unavailable result. The agent stays running and reconnects automatically
+after rosbridge returns. Each connection restores the battery subscription;
+camera subscriptions remain on demand. Previous actions, services and velocity
+streams are never replayed on the new connection. Microphone conversations and
+web chat sessions retain their existing context because the agent is not restarted.
+
+To request an immediate retry, say or type "Reconnect to the robot." The
+`reconnect_robot` tool waits up to `connect_timeout_secs` and reports `connected`
+or `disconnected`, plus `retrying` and `motion_recovery_required`. If rosbridge
+is still offline, background retries continue. The optional
+`reconnect_interval_secs` setting belongs in `config/robot.json`; existing
+configurations use the two-second default. A reconnect request leaves an already
+healthy connection intact.
+
+If an earlier motion's result was lost, check the robot and explicitly tell the
+agent it is physically stopped before asking it to recover motion tools. It
+must not infer that confirmation merely from "reconnect". This recovery does not
+resume the interrupted command or issue motion by itself.
 
 ## Troubleshooting
 

@@ -2,6 +2,7 @@
   "url": "ws://127.0.0.1:9090",
   "frame_id": "map",
   "connect_timeout_secs": 10,
+  "reconnect_interval_secs": 2,
   "action_timeout_secs": 300,
   "telemetry_timeout_secs": 5,
   "telemetry_max_age_secs": 5,

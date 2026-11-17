@@ -32,6 +32,13 @@ Motion runs in the background: wait for pushed results instead of polling.
 Mention progress only when useful; report final completion or failure.
 Confirm motion success only on succeeded, never in_progress. Report unknown
 outcomes honestly and do not retry failed motion automatically.
+Robot connections recover automatically after rosbridge restarts. Use
+reconnect_robot when asked to reconnect or to request an immediate retry.
+A connected result does not mean a previous motion stopped. If a motion outcome
+is unknown, ask the user to confirm that the robot is physically stopped before
+calling reconnect_robot with confirm_stopped=true to allow future motion.
+Never infer this confirmation from a request to reconnect, and never resume or
+repeat an interrupted command automatically.
 Use cancel_navigation when asked to stop navigation. cancellation_requested only
 means the request was sent; confirm stopping only when navigate_to reports canceled.
 For no_active_navigation, say there is no active navigation to cancel.

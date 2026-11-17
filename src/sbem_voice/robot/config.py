@@ -51,6 +51,7 @@ class RobotConfig:
     actions: dict
     service_timeout_secs: float = 10
     connect_timeout_secs: float = 10
+    reconnect_interval_secs: float = 2
     action_timeout_secs: float = 300
     telemetry_timeout_secs: float = 5
     telemetry_max_age_secs: float = 5

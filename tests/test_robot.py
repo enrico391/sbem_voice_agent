@@ -489,6 +489,45 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await self.robot.get_battery_status()
 
+    async def test_reconnect_tool_preserves_uncertainty_until_explicit_stopped_confirmation(self):
+        tool = next((fn for fn in robot_functions if fn.__name__ == "reconnect_robot"), None)
+        self.assertIsNotNone(tool, "reconnect_robot must be available to the LLM")
+        self.robot.motion_uncertain = True
+        results = []
+
+        async def callback(result):
+            results.append(result)
+
+        params = SimpleNamespace(
+            app_resources=SimpleNamespace(robot=self.robot), result_callback=callback
+        )
+        await tool(params)
+        self.assertEqual(results[-1]["status"], "connected")
+        self.assertTrue(results[-1]["motion_recovery_required"])
+        self.assertTrue(self.robot.motion_uncertain)
+        await tool(params, confirm_stopped=True)
+        self.assertFalse(results[-1]["motion_recovery_required"])
+        self.assertFalse(self.robot.motion_uncertain)
+
+    async def test_motion_recovery_cannot_clear_latch_while_another_motion_is_active(self):
+        self.robot.motion_uncertain = True
+        async with self.robot.motion_lock:
+            with self.assertRaisesRegex(ValueError, "motion"):
+                await self.robot.reconnect_robot(confirm_stopped=True)
+        self.assertTrue(self.robot.motion_uncertain)
+
+    async def test_offline_motion_is_rejected_without_latching_unknown_outcome(self):
+        await self.socket.close()
+        async with asyncio.timeout(1):
+            while self.bridge.connected:
+                await asyncio.sleep(0)
+        with self.assertRaises(ConnectionError):
+            await self.robot.motion("dock")
+        self.assertFalse(self.robot.motion_uncertain)
+        with self.assertRaises(ConnectionError):
+            await self.robot.cmd_vel(0.1, 0, 0.1)
+        self.assertFalse(self.robot.motion_uncertain)
+
     async def test_timeout_requests_cancel_without_reporting_success(self):
         task = asyncio.create_task(self.robot.motion("dock"))
         goal = await self.socket.sent.get()
@@ -713,7 +752,7 @@ class RobotTests(unittest.IsolatedAsyncioTestCase):
         from pipecat.processors.aggregators.llm_context import LLMContext
 
         context = LLMContext(tools=robot_functions)
-        self.assertEqual(len(context.tools.standard_tools), 9)
+        self.assertEqual(len(context.tools.standard_tools), 10)
         updates = []
 
         async def callback(value, *, properties=None):
