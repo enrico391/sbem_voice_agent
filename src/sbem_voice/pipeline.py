@@ -79,7 +79,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments, settin
                 transport.input(),
                 WakeWordGate(session, detector),
                 stt,
-                AwakeTranscriptFilter(session),
+                AwakeTranscriptFilter(session, echo_tail_secs=getattr(args, "echo_tail_secs", 0.8)),
                 user,
                 llm,
                 tts,

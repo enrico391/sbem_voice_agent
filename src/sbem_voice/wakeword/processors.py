@@ -2,10 +2,13 @@
 
 import asyncio
 from dataclasses import dataclass
+from time import monotonic
 
 from loguru import logger
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     Frame,
@@ -17,6 +20,8 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -180,11 +185,16 @@ class WakeWordGate(FrameProcessor):
 
 
 class AwakeTranscriptFilter(FrameProcessor):
-    """Ignore transcripts admitted asleep or queued across a sleep/wake boundary."""
+    """Reject sleeping input and playback transcripts without local voice detection."""
 
-    def __init__(self, session: ConversationSession, **kwargs):
+    def __init__(self, session: ConversationSession, *, echo_tail_secs: float = 0.8, **kwargs):
         super().__init__(**kwargs)
         self._session = session
+        self._echo_tail_secs = echo_tail_secs
+        self._bot_speaking = False
+        self._echo_until = 0.0
+        self._vad_speaking = False
+        self._speech_confirmed = False
 
     async def queue_frame(self, frame, direction=FrameDirection.DOWNSTREAM, callback=None):
         if direction == FrameDirection.DOWNSTREAM and isinstance(
@@ -199,6 +209,24 @@ class AwakeTranscriptFilter(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        # The user aggregator broadcasts its VAD and turn events upstream.
+        # Observe them here before admitting transcripts downstream to it.
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+            self._speech_confirmed = self._vad_speaking
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+            self._echo_until = monotonic() + self._echo_tail_secs
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._vad_speaking = True
+            self._speech_confirmed = True
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._vad_speaking = False
+            # Keep confirmation until turn finalization: STT's final transcript
+            # can arrive after the user's last audio and VAD stop event.
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            self._speech_confirmed = False
+
         if direction == FrameDirection.DOWNSTREAM and isinstance(
             frame, (TranscriptionFrame, InterimTranscriptionFrame)
         ):
@@ -208,6 +236,11 @@ class AwakeTranscriptFilter(FrameProcessor):
                 or self._session.closing
                 or admitted != self._session.generation
             ):
+                return
+            if (
+                self._bot_speaking or monotonic() < self._echo_until
+            ) and not self._speech_confirmed:
+                logger.debug("Ignored playback transcript without local speech detection")
                 return
             if (
                 isinstance(frame, TranscriptionFrame)

@@ -2,6 +2,7 @@ import asyncio
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -11,9 +12,13 @@ from pipecat.frames.frames import (
     FunctionCallResultProperties,
     FunctionCallsStartedFrame,
     InputAudioRawFrame,
+    InterimTranscriptionFrame,
     LLMFullResponseStartFrame,
     LLMMessagesUpdateFrame,
     TranscriptionFrame,
+    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.utils.asyncio.task_manager import TaskManager
@@ -39,6 +44,62 @@ class Detector:
 
 
 class WakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_playback_transcripts_without_local_voice_are_discarded(self):
+        await self.session.wake()
+        await self.guard.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        self.sent.clear()
+        for cls in (InterimTranscriptionFrame, TranscriptionFrame):
+            await self.guard.process_frame(
+                cls(text="the bot hears its own reply", user_id="", timestamp=""),
+                FrameDirection.DOWNSTREAM,
+            )
+        self.assertEqual(self.sent, [])
+
+    async def test_echo_tail_blocks_late_transcripts_then_restores_quiet_speech(self):
+        await self.session.wake()
+        with patch("sbem_voice.wakeword.processors.monotonic", return_value=100.0) as clock:
+            await self.guard.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+            await self.guard.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+            self.sent.clear()
+            transcript = TranscriptionFrame(text="late echo", user_id="", timestamp="")
+            clock.return_value = 100.7
+            await self.guard.process_frame(transcript, FrameDirection.DOWNSTREAM)
+            self.assertEqual(self.sent, [])
+            clock.return_value = 100.81
+            await self.guard.process_frame(transcript, FrameDirection.DOWNSTREAM)
+            self.assertEqual(self.sent, [transcript])
+
+    async def test_vad_confirmed_interruption_keeps_delayed_final_transcript(self):
+        await self.session.wake()
+        await self.guard.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.guard.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.guard.process_frame(VADUserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        self.sent.clear()
+        transcript = TranscriptionFrame(text="stop", user_id="", timestamp="")
+        await self.guard.process_frame(transcript, FrameDirection.DOWNSTREAM)
+        self.assertEqual(self.sent, [transcript])
+
+    async def test_previous_user_turn_does_not_admit_echo_from_next_reply(self):
+        await self.session.wake()
+        await self.guard.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.guard.process_frame(VADUserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.guard.process_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.guard.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        self.sent.clear()
+        await self.guard.process_frame(
+            TranscriptionFrame(text="next reply echo", user_id="", timestamp=""),
+            FrameDirection.DOWNSTREAM,
+        )
+        self.assertEqual(self.sent, [])
+
+    async def test_playback_audio_still_reaches_local_voice_detection(self):
+        await self.session.wake()
+        await self.guard.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        self.sent.clear()
+        audio = InputAudioRawFrame(audio=b"\x01\x00" * 320, sample_rate=16000, num_channels=1)
+        await self.guard.process_frame(audio, FrameDirection.DOWNSTREAM)
+        self.assertEqual(self.sent, [audio])
+
     async def test_timeout_applies_to_next_transcript_even_without_another_wake(self):
         now = [100.0]
         self.session._clock = lambda: now[0]
